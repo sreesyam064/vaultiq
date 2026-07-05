@@ -25,7 +25,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging and a 112-test pytest suite.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 112-test pytest suite and GitHub Actions CI/CD.
 
 ---
 
@@ -61,6 +61,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 | **Database**         | SQLite (via SQLAlchemy)                                          |
 | **Auth**             | JWT (Flask-JWT-Extended)                                         |
 | **Testing**          | pytest, pytest-mock                                              |
+| **CI/CD**            | GitHub Actions                                                   |
 
 ---
 
@@ -117,6 +118,11 @@ vaultiq/
 ├── LICENSE
 ├── README.md
 ├── requirements.txt                # Root-level deps
+├── requirements-dev.txt            # Dev/test deps
+│
+├── .github/
+│   └── workflows/
+│       └── ci.yml                  # GitHub Actions pipeline
 │
 ├── backend/
 │   ├── app.py                      # Flask app factory, blueprint registration
@@ -458,11 +464,13 @@ pytest tests/ -v
 
 ### Test architecture
 
-| Tier            | External deps                | Speed | Runs in CI    |
-| --------------- | ---------------------------- | ----- | ------------- |
-| 1 — Unit        | None                         | ~2s   | ✅ Yes        |
-| 2 — Integration | HuggingFace, ChromaDB        | ~60s  | ❌ Local only |
-| 3 — Routes      | Flask only (mocked services) | ~8s   | ✅ Yes        |
+| Tier            | File                    | Tests   | External deps                | Runs in CI    |
+| --------------- | ----------------------- | ------- | ---------------------------- | ------------- |
+| 1 — Unit        | test_unit_config.py     | 6       | None                         | ✅            |
+| 1 — Unit        | test_unit_rag.py        | 64      | None                         | ✅            |
+| 2 — Integration | test_integration_rag.py | 15      | HuggingFace, ChromaDB        | ❌ local only |
+| 3 — Routes      | test_routes.py          | 27      | Flask only (mocked services) | ✅            |
+| **Total**       |                         | **112** |                              |               |
 
 ---
 
@@ -496,7 +504,7 @@ pytest tests/ -v
 | Backend (Flask API + RAG pipeline)    | ✅ Complete |
 | Frontend (Streamlit)                  | ✅ Complete |
 | Test suite (112 tests, 3 tiers)       | ✅ Complete |
-| CI/CD (GitHub Actions)                | 🔜 Planned  |
+| CI/CD (GitHub Actions)                | ✅ Complete |
 | Docker (backend + frontend + compose) | 🔜 Planned  |
 | Deployment (Render)                   | 🔜 Planned  |
 | Persistent storage upgrade            | 🔜 Planned  |
@@ -513,6 +521,34 @@ pytest tests/ -v
 - **Export** — download chat history as PDF or Markdown
 
 ---
+
+## CI/CD & Deployment
+
+### CI Pipeline (GitHub Actions)
+
+Triggers on every push and pull request to `main`.
+
+```
+push / PR
+    │
+    ▼
+1. Lint (ruff)          ~10s   — syntax errors, unused imports, undefined names
+    │ passes
+    ▼
+2. Test (pytest)        ~30s   — Tier 1 + Tier 3, mocked LLM, no API keys needed
+    │ passes
+    │
+    ├── PR / feature branch -> STOP (no deploy)
+    │
+    └── push to main only
+            │
+            ▼
+        3. Deploy (Render hook)
+           Fires RENDER_DEPLOY_HOOK_URL secret
+           Render pulls latest main and redeployes
+```
+
+Render's built-in GitHub integration is intentionally **disabled** — the deploy hook in CI ensures Render only receives a deploy signal after lint and tests both pass.
 
 ## Acknowledgements
 

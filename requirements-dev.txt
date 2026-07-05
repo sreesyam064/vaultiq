@@ -1,0 +1,11 @@
+# Development and CI dependencies — not needed in production
+# Install with: pip install -r requirements-dev.txt
+
+-r requirements.txt     # include all prod deps
+
+# Testing
+pytest
+pytest-mock
+
+# Linting
+ruff

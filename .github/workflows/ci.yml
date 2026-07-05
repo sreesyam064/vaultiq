@@ -1,0 +1,152 @@
+# CI/CD Pipeline — Vault RAG Application
+
+# WHAT THIS DOES:
+#   1. Lint     — catch syntax errors and code style issues (ruff)
+#   2. Test     — run the full pytest suite (Tiers 1 + 3, mocked LLM)
+#   3. Deploy   — trigger Render redeploy on push to main (if tests pass)
+
+# WHY THIS ORDER:
+#   Lint is fast (seconds) and catches obvious errors before spending time on test
+#   setup. Tests gate the deploy — nothing broken reaches production.
+#   Deploy only runs on main branch, not on every PR or feature branch.
+
+# WHAT DOES NOT RUN HERE:
+#   - Tier 2 integration tests — these need HuggingFace embedding model to
+#     be downloaded, which is slow and requires network access to huggingface.co.
+#     They run locally before you push.
+#     CI runs Tier 1 (unit) + 2 (routes) only — both fully mocked.
+#   - Real LLM calls — no OPENROUTER_API_KEY in CI. The test suite mocks
+#     invoke_with_retry() so no API calls are ever made.
+#   - Ollama — not installed in CI runner. Not needed since the LLM is mocked
+#     at the get_llm() / invoke_with_retry() seam.
+
+# SECRETS NEEDED:
+#   RENDER_DEPLOY_HOOK_URL
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Job 1: Lint
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ruff
+        run: pip install run
+
+      - name: Run ruff
+        # E: pycodestyle errors F: pyflakes (unused imports, undefined names)
+        # --exclude: ignore frontend (streamlit files have patterns ruff flags)
+        run: |
+          ruff check backend/ \
+            --select E,F \
+            --exclude backend/tests/ \
+            --ignore E501, E402
+        # E501 = line too long (RAG prompts are long, that's fine)
+        # E402 = module level import not at top (config patching in tests needs this)
+        working-directory: vaultiq
+
+  # Job 2: Test
+  test:
+    name: Test (pytest Tier 1 + Tier 3)
+    runs-on: ubuntu-latest
+    needs: lint # only run tests if lint passes
+
+    env:
+      # Minimal env vars needed for tests — no real secrets, no real API keys
+      # validate_config() checks these at startup; conftest.py sets them too,
+      # but setting them here makes environment explicit and auditable.
+      SECRET_KEY: "ci-test-secret-key"
+      JWT_SECRET_KEY: "ci-test-jwt-secret"
+      LLM_PROVIDER: "ollama"
+      LLM_MODEL: "qwen2.5:3b"
+      LOG_LEVEL: "WARNING"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        # Install only what the mocked test suite actually needs.
+        # langchain-huggingface and chromadb are NOT installed here —
+        # Tier 2 integration gtests (which need them) are excluded below.
+        # This keeps CI fast: ~30s install vs ~5min for the full ML stack.
+        run: |
+          pip install \
+            flask \
+            flask-sqlalchemy \
+            flask-jwt-extended \
+            flask-limiter \
+            werkzeug \
+            sqlalchemy \
+            python-dotenv \
+            langchain-core \
+            langchain-ollama \
+            langchain-openai \
+            pytest \
+            pytest-mock
+        working-directory: vaultiq
+
+      - name: Run Tier 1 unit tests
+        run: |
+          python -m pytest \
+            tests/test_unit_config.py \
+            tests/test_unit_rag.py \
+            -v --tb=short
+        working-directory: vaultiq/backend
+
+      - name: Run Tier 3 route tests
+        run: |
+          python -m pytest \
+            tests/test_routes.py \
+            -v --tb=short
+        working-directory: vaultiq/backend
+
+      # Tier 2 integration tests are intentionally excluded from CI —
+      # they require HuggingFace model download and a real Chroma instance.
+      # Run locally with: pytest tests/test_integration_rag.py
+
+  # Job 3: Deploy to Render
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: test # only deploy if ALL tests pass
+    # Only deploy on push to main — not on PRs or feature branches
+    if: github,ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Trigger Render deploy hook
+        # Render provides a deploy hook URL:
+        # Dashboard → your service → Settings → Deploy Hook
+        # Copy that URL and save it as a GitHub secret named RENDER_DEPLOY_HOOK_URL
+        #
+        # WHY A HOOK instead of Render's GitHub auto-deploy?
+        # Render's built-in GitHub integration deploys on every push regardless
+        # of whether tests passed. The hook gives us control: Render only
+        # gets the deploy signal after lint + tests both succeed.
+        run: |
+          curl -a -X "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+          -o /dev/null \
+          -w "HTTP status: %{http_code}\n"
