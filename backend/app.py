@@ -43,7 +43,6 @@ app.register_blueprint(chat_bp)
 app.register_blueprint(health_bp)
 
 logger.info(f"Routes registered: {[str(rule) for rule in app.url_map.iter_rules()]}")
-# print(app.url_map)
 
 @app.route("/")
 def home():
@@ -53,6 +52,4 @@ def home():
     
              
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-    app.run(debug=True, use_reloader=False) # use_reloader=False to turn off automatic file-watching reloader.
+    app.run(debug=False, host="0.0.0.0", port=5000)

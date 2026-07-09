@@ -1,8 +1,10 @@
 # Secrets
 .env
-*.env
-.env.local
-.env.production
+.env.prod
+.env.dev
+!.env.example
+!.env.prod.example
+!.env.dev.example
 
 # Python
 __pycache__/
@@ -42,3 +44,6 @@ backend/storage/logs/*.db
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml

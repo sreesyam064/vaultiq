@@ -25,7 +25,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 112-test pytest suite and GitHub Actions CI/CD.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 112-test pytest suite and GitHub Actions CI/CD, and Docker containerization.
 
 ---
 
@@ -62,6 +62,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 | **Auth**             | JWT (Flask-JWT-Extended)                                         |
 | **Testing**          | pytest, pytest-mock                                              |
 | **CI/CD**            | GitHub Actions                                                   |
+| **Containerization** | Docker, Docker Compose                                           |
 
 ---
 
@@ -119,6 +120,10 @@ vaultiq/
 ├── README.md
 ├── requirements.txt                # Root-level deps
 ├── requirements-dev.txt            # Dev/test deps
+├── docker-compose.dev.yml          # Dev — self-contained (Ollama, debug mode,no restart on crash)
+├── docker-compose.prod.yml         # Prod — self-contained (OpenRouter, 450MB limits, restart always)
+├── .env.dev.example                # Dev env template (copy to .env.dev, fill in secrets)
+├── .env.prod.example               # Prod env template (copy to .env.prod, fill in secrets)
 │
 ├── .github/
 │   └── workflows/
@@ -129,6 +134,10 @@ vaultiq/
 │   ├── config.py                   # Config + startup validation
 │   ├── llm_provider.py             # LLM factory + 4-model OpenRouter fallback chain
 │   ├── logging_config.py           # Rotating file logging setup
+│   ├── init_db.py                  # Initialize the database
+│   ├── Dockerfile                  # python:3.12-slim, gunicorn, model pre-baked
+│   ├── .dockerignore
+│   ├── requirements.txt            # Backend-only deps
 │   ├── pytest.ini                  # Test config + warning filters
 │   │
 │   ├── extensions/                 # Flask extensions
@@ -177,6 +186,11 @@ vaultiq/
 │
 └── frontend/
     ├── app.py                      # Streamlit entry point (login page)
+    ├── Dockerfile                  # python:3.12-slim, curl, config.toml
+    ├── .dockerignore
+    ├── requirements.txt            # Frontend-only deps (streamlit, requests)
+    ├── .streamlit/
+    │   └── config.toml             # VaultIQ dark theme + production server config
     ├── pages/
     │   ├── chat.py                 # Main chat interface
     │   ├── upload.py               # PDF upload with duplicate feedback
@@ -286,7 +300,7 @@ ChromaDB — stored with metadata:
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/vaultiq.git
+git clone https://github.com/sreesyam064/vaultiq.git
 cd vaultiq
 ```
 
@@ -460,6 +474,7 @@ Covers: auth flow, duplicate upload detection, session ownership enforcement, in
 
 ```bash
 pytest tests/ -v
+# 112 passed
 ```
 
 ### Test architecture
@@ -480,6 +495,7 @@ pytest tests/ -v
 - **Per-user data isolation** — ChromaDB queries are always filtered by `user_id`; one user can never access another's documents or chat history
 - **Rate limiting** on `/ask` keyed by JWT identity (not IP) — prevents free-tier LLM quota exhaustion by a single user
 - **Config validation at startup** — app refuses to boot with missing secrets or invalid provider config rather than failing silently mid-request
+- **No secrets in Docker image** — `.env` is in `.dockerignore`; all secrets injected via environment variables at runtime
 - **Password hashing** via Werkzeug's `generate_password_hash` / `check_password_hash`
 - **Session ownership check** — users can only read their own chat sessions (404 on others)
 - **Rotating log files** — bounded at ~150MB total, logs never contain passwords or JWT tokens
@@ -494,31 +510,8 @@ pytest tests/ -v
 - **Tiny-doc shortcut** — documents with ≤15 chunks bypass similarity search entirely (fetches all chunks directly) since sparse embedding spaces produce unreliable cosine similarities
 - **Source-aware filtering** — when a filename is mentioned in the query, ChromaDB is filtered to that document only, eliminating cross-document score pollution
 - **MMR retrieval** — Maximal Marginal Relevance diversifies retrieved chunks so the LLM receives a broader document cross-section rather than near-identical paragraphs
-
----
-
-## Project Status
-
-| Phase                                 | Status      |
-| ------------------------------------- | ----------- |
-| Backend (Flask API + RAG pipeline)    | ✅ Complete |
-| Frontend (Streamlit)                  | ✅ Complete |
-| Test suite (112 tests, 3 tiers)       | ✅ Complete |
-| CI/CD (GitHub Actions)                | ✅ Complete |
-| Docker (backend + frontend + compose) | 🔜 Planned  |
-| Deployment (Render)                   | 🔜 Planned  |
-| Persistent storage upgrade            | 🔜 Planned  |
-
----
-
-## Future Improvements
-
-- **Streaming LLM responses** — pipe token stream from OpenRouter to Streamlit for real-time output
-- **Re-ranking** — add a cross-encoder re-ranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) after MMR retrieval for higher precision
-- **Multi-modal support** — extract and embed images, tables, and diagrams from PDFs (not just text)
-- **Conversation-aware retrieval** — include recent chat history in the retrieval query for multi-turn follow-up questions
-- **Document collections** — let users organise documents into named collections and query within a collection
-- **Export** — download chat history as PDF or Markdown
+- **HuggingFace model pre-baked into Docker image** — prevents 30-60 second cold-start delay on first request after deploy
+- **Gunicorn 2 workers** — production WSGI server; capped at 2 to fit Render free-tier RAM (each worker holds the embedding model in memory ~500MB)
 
 ---
 
@@ -549,6 +542,90 @@ push / PR
 ```
 
 Render's built-in GitHub integration is intentionally **disabled** — the deploy hook in CI ensures Render only receives a deploy signal after lint and tests both pass.
+
+### Running with Docker (dev and prod environments)
+
+VaultIQ has two self-contained compose files — one for development and one for production. Each file is fully independent with no shared base. Switch environments by changingone command, nothing else.
+
+```
+docker-compose.dev.yml     dev — Ollama, DEBUG logging, no restart on crash
+docker-compose.prod.yml    prod — OpenRouter, INFO logging, memory limit, restart always
+.env.dev                   dev secrets (only SECRET_KEY + JWT_SECRET_KEY needed)
+.env.prod                ← prod secrets (add OPENROUTER_API_KEY)
+```
+
+**Setup — first time only:**
+
+```bash
+cp .env.dev.example  .env.dev    # fill in SECRET_KEY + JWT_SECRET_KEY
+cp .env.prod.example .env.prod   # fill in SECRET_KEY + JWT_SECRET_KEY + OPENROUTER_API_KEY
+```
+
+**Development (Ollama — no API key needed):**
+
+```bash
+# First time: pull the Ollama model
+docker compose -f docker-compose.dev.yml --env-file .env.dev up -d ollama
+docker exec vaultiq_ollama ollama pull qwen2.5:3b
+
+# Start
+docker compose -f docker-compose.dev.yml --env-file .env.dev up --build
+
+# Stop
+docker compose -f docker-compose.dev.yml down
+```
+
+**Production simulation (OpenRouter —tests prod config locally before deploying):**
+
+```bash
+# Start
+docker compose -f docker-compose.prod.yml --env-file .env.prod up --build
+
+# Stop
+docker compose -f docker-compose.prod.yml down
+```
+
+**Key differences per environment:**
+
+| Setting         | Dev                                          | Prod                                   |
+| --------------- | -------------------------------------------- | -------------------------------------- |
+| LLM             | Ollama `qwen2.5:3b`                          | OpenRouter `gemma-4-31b-it:free`       |
+| Ollama service  | ✅ Included                                  | ❌ Not needed (API call)               |
+| LOG_LEVEL       | DEBUG                                        | INFO                                   |
+| LLM timeout     | 120s (local CPU inference is slow)           | 30s (API calls are fast)               |
+| Retries         | 1                                            | 2                                      |
+| Rate limit      | 100/min (no quota to protect)                | 10/min (protects OpenRouter free tier) |
+| Restart policy  | `no` (stay stopped on crash to inspect logs) | `unless-stopped` (auto-recover)        |
+| Memory limit    | None                                         | 450MB (fits Render free tier 512MB)    |
+| Volume name     | `vaultiq_backend_storage_dev`                | `vaultiq_backend_storage_prod`         |
+| Container names | `vaultiq_backend_dev`                        | `vaultiq_backend_prod`                 |
+
+Dev and prod use **separate named volumes** so their data (uploads, ChromaDB, SQLite, logs) never mix even when run on the same machine. You can have both environments data on disk simultaneously.
+
+---
+
+## Project Status
+
+| Phase                                 | Status      |
+| ------------------------------------- | ----------- |
+| Backend (Flask API + RAG pipeline)    | ✅ Complete |
+| Frontend (Streamlit)                  | ✅ Complete |
+| Test suite (112 tests, 3 tiers)       | ✅ Complete |
+| CI/CD (GitHub Actions)                | ✅ Complete |
+| Docker (backend + frontend + compose) | ✅ Complete |
+| Deployment (Render)                   | 🔜 Planned  |
+| Persistent storage upgrade            | 🔜 Planned  |
+
+---
+
+## Future Improvements
+
+- **Streaming LLM responses** — pipe token stream from OpenRouter to Streamlit for real-time output
+- **Re-ranking** — add a cross-encoder re-ranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) after MMR retrieval for higher precision
+- **Multi-modal support** — extract and embed images, tables, and diagrams from PDFs (not just text)
+- **Conversation-aware retrieval** — include recent chat history in the retrieval query for multi-turn follow-up questions
+- **Document collections** — let users organise documents into named collections and query within a collection
+- **Export** — download chat history as PDF or Markdown
 
 ## Acknowledgements
 

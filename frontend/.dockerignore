@@ -1,0 +1,19 @@
+.env
+*.env
+
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+venv/
+
+.git/
+.gitignore
+
+.vscode/
+.idea/
+
+# keep .streamlit/config.toml (needed ny dockerfile COPY)
+# but exclude secrets.toml (contains API keys — never in img)
+.streamlit/secrets.toml

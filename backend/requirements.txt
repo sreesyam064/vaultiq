@@ -1,0 +1,34 @@
+# Web Framework
+flask
+flask-sqlalchemy
+flask-jwt-extended
+flask-limiter
+werkzeug
+gunicorn
+
+# Database
+sqlalchemy
+
+
+# LangChain + LLM providers
+langchain
+langchain-community
+langchain-core
+langchain-text-splitters
+langchain-chroma
+langchain-huggingface
+langchain-ollama
+langchain-openai
+
+
+# Vector store + embeddings
+chromadb
+sentence-transformers
+
+
+# PDF loading
+pypdf
+
+
+# Config
+python-dotenv

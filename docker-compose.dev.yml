@@ -1,0 +1,133 @@
+# VaultIQ — Development Environment
+
+# Self-contained dev stack. Includes Ollama — no API key needed.
+
+# USAGE:
+#   docker compose -f docker-compose.dev.yml --env-file .env.dev up --build
+
+# FIRST TIME SETUP (pull Ollama model before starting backend):
+#   Step 1 — start Ollama service first (server must be running to accept pull)
+#     docker compose -f docker-compose.dev.yml --env-file .env.dev up -d ollama
+
+#   Step 2 — pull model into running container
+#   docker exec vaultiq_ollama ollama pull qwen2.5:3b
+#
+#   Step 3 — verify model is available
+#     docker exec vaultiq_ollama ollama list
+
+#   Step 4 — start remaining services
+#     docker compose  -f docker-compose.dev.yml --env-file .env.dev up -d --build backend frontend
+
+# DAILY DEV USAGE:
+#   Start   : docker compose -f docker-compose.dev.yml --env-file .env.dev up -d
+#   Rebuild : docker compose -f docker-compose.dev.yml --env-file .env.dev up -d --build
+#   Stop    : docker compose -f docker-compose.dev.yml down
+#   Reset   : docker compose -f docker-compose.dev.yml down -v (wipes volumes)
+#   Logs    : docker compose -f docker-compose.dev.yml logs -f backend
+
+# ACCESS:
+#   Frontend    : http://localhost:8501
+#   Backend API : http://localhost:5000
+#   Health      : http://localhost:5000/health
+#   Ollama      : http://localhost:11434
+
+
+services:
+
+  # Ollama (local LLM server — dev only)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: vaultiq_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # Backend (Flask — dev settings)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vaultiq_backend_dev
+    ports:
+      - "5000:5000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env.dev}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env.dev}
+      HF_TOKEN: ${HF_TOKEN}
+
+      # Dev LLM — Ollama running in sibling container
+      # "ollama" resolves to ollama service on Docker's internal network.
+      LLM_PROVIDER: ollama
+      LLM_MODEL: qwen2.5:3b
+      OLLAMA_HOST: http://ollama:11434
+
+      # Dev tuning:
+      # - longer timeout: local CPU inference is slow (30-120s per call)
+      # - 1 retrt: no point hammering a slow local model
+      # - High rate limit: no API quota to protect in dev
+      # - DEBUG logging: verbose output for development
+      LLM_TIMEOUT_SECONDS: 120
+      LLM_MAX_RETRIES: 1
+      ASK_RATE_LIMIT: 100 per minute
+      LOG_LEVEL: DEBUG
+    volumes:
+      # Named volume for persistent data (uploads, ChromaDB, and SQLite, logs)
+      # survives container restarts and `docker compose down`.
+      # only wiped by `docker compose down -v`.
+      # _dev suffix keeps dev data separate from prod data
+      - backend_storage:/app/storage
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # 60s start period — embedding model load + DB init takes ~20-30s
+      start_period: 60s
+    # Dev: stay stopped on crash so you can read logs without loop-restarts.
+    restart: "no"
+
+  # frontend (Streamlit)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vaultiq_frontend_dev
+    ports:
+      - "8501:8501"
+    environment:
+      # "backend" resolves to backend service on Docker's internal network .
+      # Port 5000 is internal port, not the host-mapped one.
+      BACKEND_URL: http://backend:5000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Dev: stay stopped on crash — same reason as backend.
+    restart: "no"
+
+
+# Named volumes
+# _dev suffix on backend_storage keeps dev data separate from prod data.
+# ollama_models has no suffix — model weights are env-agnostic.
+volumes:
+  ollama_models:
+    name: vaultiq_ollama_models
+  backend_storage:
+    name: vaultiq_backend_storage_dev
+    
