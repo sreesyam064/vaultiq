@@ -10,6 +10,8 @@ Phase 5: 4-type query router — summarize / compare / concepts / interview /
          factual — each with tailored chunk count & prompt
 Phase 6: LLM provider abstraction (Ollama dev / Openrouter prod),
          retry + timeout on LLM calls, structures logging
+Phase 7: Eager model warm-up via wsgi.py + gunicorn preload_app — duplicate
+         model loading across workers and slow first requests
 """
 
 import os
@@ -51,7 +53,11 @@ WHY LAZY:
     - Unit tests import rag_service freely with zero network calls.
     - Tests mock these functions before the first real call, so
       integration tests never hit the real model either (unless wanted).
-    - In production, the model loads on the first request, not at boot.
+    - In production, the model loads on the first request, not at boot, 
+        UNLESS wsgi.py explicitly calls these functions at import time
+        (which it does — see wsgi.py). Combined with gunicorn's preload_app=True,
+        this means model loads exactly ONCE in master process before forking, and 
+        workers share it via copy-on-write memory instead of each loading their own copy.
 """
 
 _embedding_model = None
@@ -539,6 +545,10 @@ def ask_question(question, user_id):
     # ollama: uses invoke_with_retry directly — no fallback neeed.
     try:
         logger.info(f"Calling LLM (provider={LLM_PROVIDER}, query_type={query_type})...")
+        
+        logger.info(f"Prompt length: {len(prompt)}")
+        logger.info(f"Context length: {len(context)}")
+        logger.info(f"Total length (prompt + context): {len(prompt)+len(context)}")
         
         if LLM_PROVIDER =="openrouter":
             from config import get_llm_api_key, LLM_TIMEOUT_SECONDS

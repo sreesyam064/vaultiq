@@ -55,6 +55,11 @@ services:
       LLM_MAX_RETRIES: 2
       ASK_RATE_LIMIT: 10 per minute
       LOG_LEVEL: INFO
+      # Gunicorn worker timeout (gunicorn.conf.py reads this).
+      # Worst case: 4-model fallback chiain x (LLM_MAX_RETRIES+1) attempts x LLM_TIMEOUT_SECONDS,
+      # plus backoff delays, can approach ~300-370s if every model hits a transient (non-429) failure.
+      # Set comfortably above that as a slow-but-successful fallback chain isn't killed mid-recovery.
+      GUNICORN_TIMEOUT: 400
     volumes:
       # Named volume for persistent data (uploads, ChromaDB, and SQLite, logs)
       # _prod suffix keeps prod data fully separate from dev data.

@@ -1,6 +1,17 @@
 import requests
+import os
 
-BASE_URL = "http://127.0.0.1:5000"
+# Double-slash URLs
+# Original: BASE_URL = "http://127.0.0.1:5000/"
+# Every endpoint called as f"{BASE_URL}/register" → "http://127.0.0.1:5000//register"
+# Flask ignores the double slash locally, but it can fail on deployed reverse
+# proxies (nginx, Render's routing layer). Remove the trailing slash from BASE_URL.
+# BASE_URL is configurable via env var so the same image
+# works in all environments without rebuilding:
+#   Local (no Docker):  http://127.0.0.1:5000   (default)
+#   Docker Compose:     http://backend:5000     (set via BACKEND_URL env var)
+#   Production Render:  https://your-api.onrender.com  (set via BACKEND_URL env var)
+BASE_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:5000").rstrip("/")
 
 # Authentication
 

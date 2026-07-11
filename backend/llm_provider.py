@@ -76,12 +76,18 @@ def get_llm(provider: str, model_name: str, api_key: str = None, timeout: int = 
     logger.info(f"Initializing LLM provider='{provider}' model='{model_name}' timeout='{timeout}s'")
     
     if provider == "ollama":
+        # Local dev — no API key needed, model runs on machine via ollama.
+        # OLLAMA_HOST lets us point at a remote Ollama server without code changes:
+        #   No Docker:        http://localhost:11434  (default)
+        #   Docker Compose:   http://ollama:11434     (set via OLLAMA_HOST env var)
+        import os
         from langchain_ollama import ChatOllama
-        return ChatOllama(model=model_name, timeout=timeout)
+        base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        return ChatOllama(model=model_name, timeout=timeout, base_url=base_url)
     
     elif provider == "openrouter":
         # Production — single gateway to all free-tier models
-        # Uses OpenAI-compatible API format, so ChatOpenAI works directly
+        # Uses OpenAI-compatible API format, so ChatOpenAI works directly by overriding base_url.
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter")
         from langchain_openai import ChatOpenAI

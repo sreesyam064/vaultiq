@@ -38,6 +38,17 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Baking it into image means model is always available at startup.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
+# Force offline model loading at runtime
+# WHY: sentense-transformers / huggingface_club still makes a network call to check for an updated
+#   etag/manifest EVERY TIME model is instantiated — even though we just pre-downloaded weights above.
+#   that network round trip is separate from any app-level timeout (LLM_TIMEOUT_SECONDS, gunicorn --timeout)
+#   because it happens inside huggingface_club's own connection
+#   logic — raising your own timeouts does nothing to it. This was actual cause of first request latency.
+#   HF_HUB_OFFLINE=1 forces pure local-cache loading with zero network calls.
+#   Safe because weights are already baked into image above.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 # Application code
 COPY . .
 
@@ -58,8 +69,10 @@ EXPOSE 5000
 #   --timeout: fail if no response in 10s
 #   --retries: mark unhealthy after 3 consecutive failures
 #   --start-period: give app 60s to start before health check begin
-#   (embedding model load + DB init takes ~20-30s on first boot)
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
+#   Now 90s because wsgi.py eagerly loads embedding model and constructs LLM client at container startup
+#   instead of deferring that cost to first request. Startup is slightly slow;
+#   first real user request is now fast instead of timing out.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=90s \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Entrypoint
@@ -68,25 +81,14 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
 #   gunicorn is a production WSGI server that handles concurrent requests,
 #   graceful restarts, and worker process management.
 
-# -w 2 : 2 worker processes
-#   WHY 2 and not more: each worker loads embedding model (~500MB RAM).
-#   Render's free tier has 512MB RAM. 2 workers = safer than 4.
-#   Formula for workers is usually (2 * CPU cores) + 1, but RAM is the 
-#   binding constraint here on free-tier hosting.
 
-# --timeout 120 : worker killed if a request takes > 120s
-#   WHY 120: LLM calls (even fast ones via OpenRouter) can take 10-30s.
-#   The default gunicorn timeout of 30s would kill the worker mid-LLM-call.
 
-# --bind 0.0.0.0:5000 : listen on all interfaces inside container (not just 127.0.0.1)
-#   so Docker's port mapping can reach it
+# WHY wsgi:app instead of app:app:
+#   wsgi.py eagerly warms embedding model, LLM client, and DB tables ONCE before
+#   gunicorn forks workers. app.py alone stays cheap to import so test suite can 
+#   import it directly without triggering real model downloads or network calls.
 
-CMD ["sh", "-c", "\
-    python init_db.py && \
-    exec gunicorn \
-    --workers 1 \
-    --timeout 300 \
-    --bind 0.0.0.0:5000 \
-    --access-logfile - \
-    --error-logfile - \
-    app:app"]
+# All worker count, timeout, and logging settings now live in gunicorn.conf.py
+# (--config flag below)  rather than CLI flags — this is what makes `preload_app` and `post_fork` 
+# DB-reset hook possible.
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "wsgi:app"]
