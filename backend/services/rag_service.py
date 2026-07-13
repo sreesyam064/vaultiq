@@ -193,8 +193,14 @@ def _extract_source_filter(question, vectordb, user_id):
     q = question.lower()
 
     # Get all unique source filenames this user has uploaded
+    # FIX: `vectordb.get()` previously fetched all documents + metadata for
+    # each query. We only need metadata (`source`), so limit the fetch to
+    # `include=["metadatas"]` to reduce I/O and latency.
     try:
-        all_chunks = vectordb.get(where={"user_id": str(user_id)})
+        all_chunks = vectordb.get(
+            where={"user_id": str(user_id)}, 
+            include=["metadatas"],
+        )
         sources = set()
         for meta in all_chunks.get("metadatas", []):
             src = meta.get("source", "")
@@ -206,7 +212,7 @@ def _extract_source_filter(question, vectordb, user_id):
     if not sources:
         return None
 
-        # Check if any filename (or its stem without extension) appears in the question.
+    # Check if any filename (or its stem without extension) appears in the question.
     # Three matching strategies, tried in order:
     #   1. Full filename:  "resume.pdf"              in question
     #   2. Stem as-is:     "resume"                  in question
@@ -258,7 +264,7 @@ def ingest_pdf(pdf_path, user_id):
             limit=1,
         )
         if existing and existing.get("ids"):
-            logging.info(f"'{filename}' already ingested for user {user_id}. Skipping.")
+            logger.info(f"'{filename}' already ingested for user {user_id}. Skipping.")
             return 0
         
     # Load PDF
@@ -372,8 +378,11 @@ def ask_question(question, user_id):
     else:
 
         # Count chunks for this filter scope
+        # FIX: Same over-fetching issue as above. We only need the chunk count,
+        # so `include=[]` returns only ids instead of loading documents,
+        # metadata, and embeddings.
         try:
-            total_chunks = len(vectordb.get(where=user_filter)["ids"])
+            total_chunks = len(vectordb.get(where=user_filter, include=[])["ids"])
         except Exception:
             total_chunks = 0
             
@@ -522,7 +531,7 @@ def ask_question(question, user_id):
     # Inject the task-specific instruction for this query type.
     instruction = PROMPT_INSTRUCTIONS[query_type]
     
-    prompt = f"""You are a helpful assistant for ValtIQ, a Personal Knowledge Base application.
+    prompt = f"""You are a helpful assistant for VaultIQ, a Personal Knowledge Base application.
     A user has uploaded their  documents and is asking questions about them.
     
     Your task: {instruction}
@@ -530,7 +539,7 @@ def ask_question(question, user_id):
     Important rules:
     - Use ONLY the context provided below. Do not use outside knowledge.
     - Do not make up facts or invent information.
-    - If the context is insufficient, say what IS available and not the gap.
+    - If the context is insufficient, say what IS available and note the gap.
     
     Context:
     {context}

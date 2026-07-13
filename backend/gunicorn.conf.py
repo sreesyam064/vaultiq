@@ -34,7 +34,7 @@ workers = int(os.getenv("GUNICORN_WORKERS", "2"))
 preload_app = True
 
 # Worker killed if request takes longer than this.
-timeout = int(os.getenv("GUNICORN_TIMEOUT", "3000"))
+timeout = int(os.getenv("GUNICORN_TIMEOUT", "300"))
 
 # Logging
 # "-" means stdout/stderr — picked up by rotating file handlers in logging_config.py

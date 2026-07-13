@@ -25,7 +25,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 112-test pytest suite and GitHub Actions CI/CD, and Docker containerization.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 114-test pytest suite and GitHub Actions CI/CD, and Docker containerization.
 
 ---
 
@@ -45,7 +45,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 - **LLM provider abstraction** — Ollama locally, OpenRouter (free tier) in production
 - **4-model fallback chain** — if primary model is rate-limited, automatically tries backup → fallback → emergency
 - **Production hardening** — JWT auth, rate limiting, config validation at startup, retry/timeout on all LLM calls, rotating file logging, `/health` and `/health/deep` endpoints
-- **112-test pytest suite** — unit, integration, and route tests across 3 tiers
+- **114-test pytest suite** — unit, integration, and route tests across 3 tiers
 
 ---
 
@@ -484,7 +484,7 @@ pytest tests/ -v
 | 1 — Unit        | test_unit_config.py     | 6       | None                         | ✅            |
 | 1 — Unit        | test_unit_rag.py        | 64      | None                         | ✅            |
 | 2 — Integration | test_integration_rag.py | 15      | HuggingFace, ChromaDB        | ❌ local only |
-| 3 — Routes      | test_routes.py          | 27      | Flask only (mocked services) | ✅            |
+| 3 — Routes      | test_routes.py          | 29      | Flask only (mocked services) | ✅            |
 | **Total**       |                         | **112** |                              |               |
 
 ---
@@ -509,9 +509,19 @@ pytest tests/ -v
 - **Adaptive relevance threshold** — `threshold = mean + (max - mean) * 0.5` adjusts to each query's score distribution, preventing noise on large docs and over-filtering on small ones
 - **Tiny-doc shortcut** — documents with ≤15 chunks bypass similarity search entirely (fetches all chunks directly) since sparse embedding spaces produce unreliable cosine similarities
 - **Source-aware filtering** — when a filename is mentioned in the query, ChromaDB is filtered to that document only, eliminating cross-document score pollution
+- **Minimal chroma fetches** — metadata-only lookups (filename detection, chunk counting) use `include=["metadatas]` / `include=[]` instead of the default, which otherwise pulls full document text for the entire collection on every single query regardless of relevance
 - **MMR retrieval** — Maximal Marginal Relevance diversifies retrieved chunks so the LLM receives a broader document cross-section rather than near-identical paragraphs
 - **HuggingFace model pre-baked into Docker image** — prevents 30-60 second cold-start delay on first request after deploy
+- **Eager model warm-up via `wsgi.py` + gunicorn `preload_app`** — embedding model and LLM client load once in the master process before forking. workers share them via copy-on-write instead of each loading a separate copy
 - **Gunicorn 2 workers** — production WSGI server; capped at 2 to fit Render free-tier RAM (each worker holds the embedding model in memory ~500MB)
+
+---
+
+## Known Limitations
+
+- **Local Ollama generation time on long-form answers (dev environment only)** `qwen2.5:3b` running on CPU via Ollama generates output proportionally to requested length, not just input/context size. Query types that explicitly ask for long, multi-part output — `interview` (6 full Q&A pairs), or a `factual`/`summarize` question phrased as "explain each type in detailed with examples" — can exceed even a generous gunicorn worker timeout (300s in dev) on typical development hardware. Shorter or more direct questions complete comfortably within 1-3 minutes.
+  - This is a **dev-only** limitation. Production uses OpenRouter's hosted inference (`google/gemma-4-31b-it:free` and its fallback chain), which is dramatically faster than local CPU-bound Ollama and does not exhibit this behaviour.
+  - No code changes are needed to work around this for local testing — prefer more direct/scoped questions when testing against Ollama, or expect longer waits on deliberately verbose prompts.
 
 ---
 
@@ -619,6 +629,18 @@ Dev and prod use **separate named volumes** so their data (uploads, ChromaDB, SQ
 ---
 
 ## Future Improvements
+
+### Persistent Storage (Priority)
+
+The current deployment uses Render's ephemeral filesystem — all data is wiped on redeploy and after 15 minutes of inactivity on free tier. The planned upgrade replaces all three storage layers with permanent free-tier cloud services:
+
+| Layer        | Current              | Planned                                                                     | Why                                        |
+| ------------ | -------------------- | --------------------------------------------------------------------------- | ------------------------------------------ |
+| Database     | SQLite (local file)  | [Supabase](https://supabase.com) PostgreSQL                                 | Free managed Postgres, 500MB, never wiped  |
+| Vector store | ChromaDB (local dir) | [Qdrant Cloud](https://qdrant.tech)                                         | Free managed vector DB, 1GB, persistent    |
+| File storage | Local filesystem     | [Cloudflare R2](https://cloudflare.com/r2) or Supabase Storage or Amazon S3 | Free object storage (R2: 10GB), CDN-backed |
+
+### Other Improvements
 
 - **Streaming LLM responses** — pipe token stream from OpenRouter to Streamlit for real-time output
 - **Re-ranking** — add a cross-encoder re-ranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) after MMR retrieval for higher precision

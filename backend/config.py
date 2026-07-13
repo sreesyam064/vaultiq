@@ -80,7 +80,7 @@ LLM_MAX_RETRIES     = int(os.getenv("LLM_MAX_RETRIES", "2"))
 # RAG pipeline
 EMBEDDING_MODEL =os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 CHUNK_SIZE      = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "20"))
+CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "200"))
 RETRIEVAL_K     = int(os.getenv("RETRIEVAL_K", "5"))
 
 # Rate limiting
