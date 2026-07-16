@@ -13,6 +13,7 @@ from config import (
     SQLALCHEMY_DATABASE_URI,
     SQLALCHEMY_TRACK_MODIFICATIONS,
     UPLOAD_FOLDER,
+    MAX_UPLOAD_SIZE_BYTES,
     validate_config,
 )
 
@@ -32,6 +33,9 @@ app.config["JWT_SECRET_KEY"] = JWT_SECRET_KEY
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = SQLALCHEMY_TRACK_MODIFICATIONS
+# To limit server-side size to eliminate taking down disk/memory by large request body before app code even run
+# MAX_CONTENT_LENGTH enforced by werkzeug at WSGI layer, before flask parses request body at all.
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE_BYTES
 
 db.init_app(app)
 jwt.init_app(app)
@@ -50,6 +54,14 @@ def home():
         "message": "RAG API Running"
     }
     
-             
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    # Without this handler, exceeding MAX_CONTENT_LENGTH returns flask's default
+    # HTML error page instead of JSON — breaking frontend, which always expects a JSON body from this API.
+    from config import MAX_UPLOAD_SIZE_MB
+    return jsonify({
+        "error": f"Upload too large. Maximum total size is {MAX_UPLOAD_SIZE_MB}MB.",
+    }), 413   
+    
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5000)

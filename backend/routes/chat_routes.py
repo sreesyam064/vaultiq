@@ -64,7 +64,6 @@ def ask():
     
     session_id = data.get("session_id")
     question = data.get("question")
-    
     if not session_id or not question:
         return jsonify({"error": "session_id and question are required"}), 400
     

@@ -146,6 +146,78 @@ class TestUploadRoute:
         assert resp.status_code == 409
         assert "skipped" in data
         
+    def test_upload_ingest_failure_does_not_create_orphaned_record(self, client, db_session, auth_headers, monkeypatch):
+        """
+        if ingest_pdf() raises(e.g. worker crash, OOM, corrupt PDF), SQL Document row must NOT be created.
+        Previously SQL commit happened before ingest_pdf() ran, so a failure here would leave a permanent orphaned 
+        record — file would be struck forever, blocked by duplicate check on every future upload attempt, with
+        zero actual data in ChromaDB.
+        """
+        monkeypatch.setattr(
+            "routes.upload_routes.ingest_pdf",
+            lambda path, uid: (_ for _ in ()).throw(RuntimeError("simulated ingest crash")),
+        )
+        
+        pdf_bytes = b"%PDF-1.4 fake pdf content"
+        resp = client.post(
+            "/upload", headers=auth_headers,
+            data={"file": (io.BytesIO(pdf_bytes), "crashy.pdf")},
+            content_type="multipart/form-data"
+        )
+        
+        data = resp.get_json()
+        
+        # Genuine failure -> 500, reported as a distinct "errors" entry
+        assert resp.status_code == 500
+        assert "errors" in data
+        assert data["errors"][0]["file"] == "crashy.pdf"
+        assert "uploaded" not in data
+        assert "skipped" not in data
+        
+        # Criitical assertion: no SQL Document record exists for this file.
+        # If old buggy ordering were still in place, this would find a row and file would
+        # be perminantly stuck.
+        with client.application.app_context():
+            from models import Document
+            existing = Document.query.filter_by(filename="crashy.pdf").first()
+            assert existing is None, (
+                "Document row should NOT exist after a failed ingest — "
+                "this is exactly the orphaned-record bug this fix addresses"
+            )
+            
+    def test_upload_retry_succeeds_after_ingest_failure(self, client, db_session, auth_headers, monkeypatch):
+        """
+        After a failed upload (ingest_pdf raised), retrying SAME filename must succeed — not be blocked
+        by a stale duplicate-check, since no SQL row was created on failyure.
+        """
+        pdf_bytes = b"%PDF-1.4 fake pdf content"
+        # First attempt: ingest_pdf fails
+        monkeypatch.setattr(
+            "routes.upload_routes.ingest_pdf",
+            lambda path, uid: (_ for _ in ()).throw(RuntimeError("simulated crash")),
+        )
+        first = client.post(
+            "/upload", headers=auth_headers,
+            data={"file": (io.BytesIO(pdf_bytes), "retry.pdf")},
+            content_type="multipart/form-data"
+        )
+        assert first.status_code == 500
+
+        # Second attempt: ingest_pdf now succeeds (simulates the transient
+        # failure — e.g. OOM under load — not recurring on retry)
+        monkeypatch.setattr("routes.upload_routes.ingest_pdf", lambda path, uid: 5)
+        second = client.post(
+            "/upload", headers=auth_headers,
+            data={"file": (io.BytesIO(pdf_bytes), "retry.pdf")},
+            content_type="multipart/form-data"
+        )
+        data = second.get_json()
+
+        # Must succeed as a fresh upload, NOT be rejected as a duplicate
+        assert second.status_code == 200
+        assert "uploaded" in data
+        assert data["uploaded"][0]["file"] == "retry.pdf"
+        assert "skipped" not in data           
         
 # Chat routes
 

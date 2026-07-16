@@ -63,12 +63,26 @@ def app(tmp_path_factory):
     
     flask_app.config.update({
         "TESTING":                  True,
-        "SQLALCHEMY_DATABASE_URI": "sqlite://:memory",
+        # The correct in-memory SQLite URI is "sqlite:///:memory:" (three slashes, trailing colon)
+        "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
         "JWT_SECRET_KEY":           "test-jwt-secret",
         "SECRET_KEY":               "test-secret-key",
         "RATELIMIT_ENABLED":        False, # disable rate limiting in tests
     })
     
+    # flask_limiter reads RATELIMIT_ENABLED from app.config only once, inside limiter.init_app(app) 
+    # Setting app.config["RATELIMIT_ENABLED"]     after that point has no effect; flask-limiter already
+    # cached its enabled/disabled state as plain attribute at init time.
+    
+    # Without this, auth_headers (called by n early every route test) hits /register and /login repeatedly across
+    # whole session, and once AUTH_RATE_LIMIT's cap (5/min) is exceeded, every later test gets 429 instead of response
+    # its actually testing for.
+    
+    # Setting limiter's `enabled` attribute directly is reliable, version-agnostic way to disable enforcement for whole test session
+    # regardless of config-timing.
+    from extensions import limiter as _limiter
+    _limiter.enabled = False
+
     yield flask_app
     
 

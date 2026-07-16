@@ -88,6 +88,21 @@ RETRIEVAL_K     = int(os.getenv("RETRIEVAL_K", "5"))
 # this prevents one user from burning the quota for everyone else.
 ASK_RATE_LIMIT  = os.getenv("ASK_RATE_LIMIT", "10 per minute")
 
+# rate limiting for /login and /register
+# to avoid unlimited brute-force / credential-stuffing attempts.
+AUTH_RATE_LIMIT = os.getenv("AUTH_RATE_LIMIT", "5 per minute")
+
+# Upload limits
+# MAX_UPLOAD_SIZE_MB caps single file's size. Also used to set flask's 
+# MAX_CONTENT_LENGTH (total request body cap) in app.py, so a single file 
+# request cant smuggle a huge payload past per-file check by splitting it across
+# many small-looking multipart fields.
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# Max no.of files accepted in single /upload request. 
+MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", "10"))
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 

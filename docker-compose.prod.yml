@@ -19,13 +19,12 @@
 #   Health deep : http://localhost:5000/health/deep
 
 # NOTE:
-#   On Render, docker-compose is not used — Render builds directly from 
+#   On Render, docker-compose is not used — Render builds directly from
 #   backend/Dockerfile and frontend/Dockerfile via render.yaml.
 #   This file is for simulating the production environment locally before
 #   deploying, so you can catch config issues without a Render redeploy.
 
 services:
-
   # Backend (Flask API — prod settings)
   backend:
     build:
@@ -77,7 +76,7 @@ services:
         limits:
           # 2 gunicorn workers * ~180MB each + OS overhead ≈ 420MB.
           # Cap at 450MB to stay within Render free tier's 512MB RAM.
-          memory: 450MB
+          memory: 450M
 
   # frontend (Streamlit)
   frontend:
@@ -106,4 +105,3 @@ services:
 volumes:
   backend_storage:
     name: vaultiq_backend_storage_prod
-    

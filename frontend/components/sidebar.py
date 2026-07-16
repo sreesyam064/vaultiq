@@ -47,7 +47,7 @@ def show_sidebar():
                 continue
                         
             # Mark current active session
-            if session["id"] == st.session_state["session_id"]:
+            if session["id"] == st.session_state.get("session_id"):
                 label = f"⭐ {label}"
             
             if st.button(label, key=f"session_{session['id']}", use_container_width=True): 

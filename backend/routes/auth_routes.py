@@ -1,14 +1,19 @@
+import logging
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
-from extensions import db
+from extensions import db, limiter
 from models import User
+from config import AUTH_RATE_LIMIT
+
+logger = logging.getLogger(__name__)
 
 auth_bp = Blueprint("auth", __name__)
 
 # Register
 @auth_bp.route("/register", methods=["POST"])
+@limiter.limit(AUTH_RATE_LIMIT)
 def register():
     data = request.get_json()
     
@@ -44,6 +49,7 @@ def register():
     
 # Login
 @auth_bp.route("/login", methods=["POST"])
+@limiter.limit(AUTH_RATE_LIMIT)
 def login():
     data = request.get_json()
     
@@ -62,7 +68,7 @@ def login():
     if not check_password_hash(user.password_hash,password):
         return jsonify({"error": "Invalid email or password"}), 401
 
-    print("Login Successful")
+    logger.info(f"Login Successful for user_id={user.id}")
     
     token = create_access_token(identity=str(user.id))  # jwt prefer str over int
     

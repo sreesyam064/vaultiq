@@ -33,6 +33,7 @@ if st.button("Upload", use_container_width=True):
             
             uploaded = result.get("uploaded", [])
             skipped = result.get("skipped", [])
+            errors = result.get("errors", [])
             
             if uploaded:
                 names = ", ".join(f["file"] for f in uploaded)
@@ -42,9 +43,13 @@ if st.button("Upload", use_container_width=True):
                 for item in skipped:
                     st.warning(f"'{item['file']}' was skipped — {item['reason']}")
             
-            if not uploaded and not skipped:
+            if errors:
+                for item in errors:
+                    st.error(f"'{item['file']}' failed — {item['reason']}")
+                    
+            if not uploaded and not skipped and not errors:
                 st.info("No files were processed.")
-                
+                     
             if uploaded:
                 st.switch_page("pages/chat.py")
     

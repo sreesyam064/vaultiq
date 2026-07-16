@@ -427,10 +427,6 @@ def ask_question(question, user_id):
             #   150 chunks    (40-page doc)       → k = 5
             #   223 chunks    (128-page book)     → k = 7
             #   500+ chunks   (very large)        → k = 10
-            try:
-                total_chunks = len(vectordb.get(where=user_filter)["ids"])
-            except Exception:
-                total_chunks = 0
         
             dynamic_k = min(10, max(3, total_chunks // 30)) if total_chunks > 0 else RETRIEVAL_K
             logger.info(f"Dynamic K={dynamic_k} (total_chunks={total_chunks})")
