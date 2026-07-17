@@ -378,3 +378,59 @@ class TestHealthRoutes:
         resp = client.get("/health")
         assert resp.status_code != 401
         assert resp.status_code != 422
+        
+class TestGlobalErrorHandling:
+    # Tests for global error handlers in app.py.
+    def test_unknown_route_returns_json_404(self, client, db_session):
+        # This API always returns JSON, including for routes that dont exist insted of Flask's default 404 (HTML page).
+        resp = client.get("/this/route/does/not/exist")
+        assert resp.status_code == 404
+        data = resp.get_json()
+        assert data is not None, "404 response must be JSON, not HTML"
+        assert "error" in data
+        
+    def test_wrong_method_returns_json_405(self, client, db_session):
+        resp = client.get("/register")
+        assert resp.status_code == 405
+        data = resp.get_json()
+        assert data is not None, "405 response must be JSON, not HTML"
+        assert "error" in data
+        
+    def test_unexpected_exception_returns_clean_json_500(self, client, db_session, auth_headers, monkeypatch):
+        # Ensure the global exception handler returns a clean JSON 500 for any
+        # unexpected error instead of Flask's default HTML error page.
+        monkeypatch.setattr(
+            "routes.chat_routes.ask_question",
+            lambda q, uid: (_ for _ in ()).throw(RuntimeError("simulated totally unexpected crash")),
+        )
+        
+        from models import Document
+        from extensions import db
+        from flask_jwt_extended import decode_token
+        
+        with client.application.app_context():
+            token = auth_headers["Authorization"].split(" ")[1]
+            user_id = int(decode_token(token)["sub"])
+            # Use a unique filename to avoid the (user_id, filename)
+            # unique constraint when other tests create sample.pdf.
+            doc = Document(user_id=user_id, filename="crash-test-doc.pdf", filepath="/fake/path.pdf")
+            db.session.add(doc)
+            db.session.commit()
+            
+        session_resp = client.post("/chat/session", headers=auth_headers)
+        session_id = session_resp.get_json()["session_id"]
+        
+        resp = client.post("/ask", headers=auth_headers, json={
+            "session_id": session_id,
+            "question": "this will crash",
+        })
+        
+        assert resp.status_code == 500
+        data = resp.get_json()
+        assert data is not None, "500 response must be JSON, not HTML"
+        assert "error" in data
+        # real exception msg must never leak to client
+        assert "simulated totally unexpected crash" not in data["error"]
+        assert "RuntimeError" not in data["error"]
+        
+        

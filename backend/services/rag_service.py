@@ -32,6 +32,7 @@ from config import (
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     RETRIEVAL_K,
+    INGEST_BATCH_SIZE,
     get_llm_api_key
 )
 
@@ -292,21 +293,23 @@ def ingest_pdf(pdf_path, user_id):
     # Unique ID per chunk — prevents duplicates if ingest run twice
     ids = [f"{user_id}_{document_id}_{i}" for i in range(len(chunks))]
     
-    # Store in ChromaDB
-    if os.path.exists(CHROMA_DB_PATH):
-        vectordb = _get_vectordb()
-        vectordb.add_documents(documents=chunks, ids=ids)
-    else:
-        from langchain_chroma import Chroma as _Chroma
-        _Chroma.from_documents(
-            documents=chunks,
-            embedding=_get_embedding_model(),
-            persist_directory=CHROMA_DB_PATH,
-            ids=ids,
+    # Add embeddings in batches to reduce peak memory usage and prevent OOM
+    # crashes during large PDF ingestion. The previous single add_documents()
+    # call embedded all chunks at once. Dead Chroma.from_documents() branch
+    # removed since CHROMA_DB_PATH always exists.
+    vectordb = _get_vectordb()
+    total = len(chunks)
+    
+    for start in range(0, total, INGEST_BATCH_SIZE):
+        end = min(start + INGEST_BATCH_SIZE, total)
+        vectordb.add_documents(
+            documents=chunks[start:end],
+            ids=ids[start:end],
         )
+        logger.debug(f"Ingested batch {start}-{end} of {total} chunks for '{filename}'.")
         
     logger.info(f"Added {len(chunks)} chunks to ChromaDB for '{filename}'.")
-    return len(chunks)
+    return total
 
 
 def ask_question(question, user_id):
@@ -335,181 +338,192 @@ def ask_question(question, user_id):
     
     logger.info(f"User {user_id} | Query: {question}")
     
-    vectordb = _get_vectordb()
-    user_filter = {"user_id": str(user_id)}
+    # Catch retrieval errors (Chroma, embeddings, search) so ask_question()
+    # always returns a user-friendly response instead of raising an exception.
+    # The actual error is logged server-side for debugging.
+    try:
+        vectordb = _get_vectordb()
+        user_filter = {"user_id": str(user_id)}
     
-    # source-aware filter
-    # If the user names a specific file in their question
-    # (e.g. "tell me about the resume.pdf document"), extract that filename
-    # and restrict retrieval to chunks from that file only.
-    # This prevents cross-document score pollution when multiple docs are uploaded.
-    source_filter = _extract_source_filter(question, vectordb, user_id)
-    if source_filter:
-        logger.info(f"Source filter detected: restricting to '{source_filter}'")
-        user_filter = {"$and": [{"user_id": str(user_id)}, {"source": source_filter}]}
+        # source-aware filter
+        # If the user names a specific file in their question
+        # (e.g. "tell me about the resume.pdf document"), extract that filename
+        # and restrict retrieval to chunks from that file only.
+        # This prevents cross-document score pollution when multiple docs are uploaded.
+        source_filter = _extract_source_filter(question, vectordb, user_id)
+        if source_filter:
+            logger.info(f"Source filter detected: restricting to '{source_filter}'")
+            user_filter = {"$and": [{"user_id": str(user_id)}, {"source": source_filter}]}
     
-    # Detect intent
-    query_type = _detect_query_type(question)
-    logger.info(f"Detected query type: '{query_type}'")
+        # Detect intent
+        query_type = _detect_query_type(question)
+        logger.info(f"Detected query type: '{query_type}'")
      
-    # Branch A: broad document-wide query
-    if query_type in BROAD_CHUNK_COUNTS:
+        # Branch A: broad document-wide query
+        if query_type in BROAD_CHUNK_COUNTS:
         
-        chunk_limit = BROAD_CHUNK_COUNTS[query_type]
-        logger.info(f"Broad query — fetching first {chunk_limit} chunks directly.")
+            chunk_limit = BROAD_CHUNK_COUNTS[query_type]
+            logger.info(f"Broad query — fetching first {chunk_limit} chunks directly.")
         
-        raw = vectordb.get(
-            where=user_filter,
-            limit=chunk_limit,
-        )
-        
-        if not raw or not raw.get("documents"):
-            return {
-                "answer": "No documents found. Please upload a PDF first.",
-                "sources": [],
-            }
-            
-        docs = [
-            Document(page_content=text, metadata=meta)
-            for text, meta in zip(raw["documents"], raw["metadatas"])
-        ]
-        
-    # Branch B: factual / specific query
-    else:
-
-        # Count chunks for this filter scope
-        # FIX: Same over-fetching issue as above. We only need the chunk count,
-        # so `include=[]` returns only ids instead of loading documents,
-        # metadata, and embeddings.
-        try:
-            total_chunks = len(vectordb.get(where=user_filter, include=[])["ids"])
-        except Exception:
-            total_chunks = 0
-            
-        # Tiny-doc shortcut
-        # WHY THIS EXISTS:
-        #   When source_filter is active (user named a specific file) AND that file
-        #   is tiny (<= 15 chunks — typically 1-3 pages), similarity search is unreliable.
-        #   The embedding model produces near-zero or negative cosine similarities
-        #   on sparse collections because there are too few reference vectors for the
-        #   space to be meaningful. Every query against a 5-chunk doc returns scores
-        #   like [-0.20, -0.15, -0.001] — all clamped to 0. The adaptive threshold then
-        #   floors at 0.10, nothing passes,and user gets "I count not find information"
-        #   even though content is there ands is what they asked about.
-        
-        #   Solution: for tiny collections, skip similarity search entirely and fetch
-        #   ALL chunks directly — same approach as broad queries. The LLM can handle 5-15 
-        #   chunks trivially and figure out relevance itself via prompt. This is far more
-        #   reliable than a cosine similarity threshold on a 5-point embedding spave.
-        TINY_DOC_THRESHOLD = 15
-        
-        if total_chunks > 0 and total_chunks <= TINY_DOC_THRESHOLD:
-            logger.info(
-                f"Tiny doc shortcut: {total_chunks} chunks ≤ {TINY_DOC_THRESHOLD}"
-                f" — fetching all chunks directly (skipping similarity search)."
+            raw = vectordb.get(
+                where=user_filter,
+                limit=chunk_limit,
             )
-            raw = vectordb.get(where=user_filter)
+
             if not raw or not raw.get("documents"):
                 return {
-                    "answer": "No relevant information found in your documents.",
+                    "answer": "No documents found. Please upload a PDF first.",
                     "sources": [],
                 }
+            
             docs = [
                 Document(page_content=text, metadata=meta)
                 for text, meta in zip(raw["documents"], raw["metadatas"])
             ]
+        
+        # Branch B: factual / specific query
         else:
-            
-            # Dynamic K
-            # Formula: total_chunks // 30, floored at 3, capped at 10.
-            # Examples:
-            #   16–89 chunks  (small/medium doc) → k = 3
-            #   150 chunks    (40-page doc)       → k = 5
-            #   223 chunks    (128-page book)     → k = 7
-            #   500+ chunks   (very large)        → k = 10
-        
-            dynamic_k = min(10, max(3, total_chunks // 30)) if total_chunks > 0 else RETRIEVAL_K
-            logger.info(f"Dynamic K={dynamic_k} (total_chunks={total_chunks})")
-        
-        
-            # MMR retrieval — diverse, non-redundant chunks
+
+            # Count chunks for this filter scope
+            # FIX: Same over-fetching issue as above. We only need the chunk count,
+            # so `include=[]` returns only ids instead of loading documents,
+            # metadata, and embeddings.
             try:
-                docs = vectordb.max_marginal_relevance_search(
-                    question,
-                    k=dynamic_k,
-                    fetch_k=dynamic_k * 3,
-                    filter=user_filter,
+                total_chunks = len(vectordb.get(where=user_filter, include=[])["ids"])
+            except Exception:
+                total_chunks = 0
+            
+            # Tiny-doc shortcut
+            # WHY THIS EXISTS:
+            #   When source_filter is active (user named a specific file) AND that file
+            #   is tiny (<= 15 chunks — typically 1-3 pages), similarity search is unreliable.
+            #   The embedding model produces near-zero or negative cosine similarities
+            #   on sparse collections because there are too few reference vectors for the
+            #   space to be meaningful. Every query against a 5-chunk doc returns scores
+            #   like [-0.20, -0.15, -0.001] — all clamped to 0. The adaptive threshold then
+            #   floors at 0.10, nothing passes,and user gets "I count not find information"
+            #   even though content is there ands is what they asked about.
+        
+            #   Solution: for tiny collections, skip similarity search entirely and fetch
+            #   ALL chunks directly — same approach as broad queries. The LLM can handle 5-15 
+            #   chunks trivially and figure out relevance itself via prompt. This is far more
+            #   reliable than a cosine similarity threshold on a 5-point embedding spave.
+            TINY_DOC_THRESHOLD = 15
+        
+            if total_chunks > 0 and total_chunks <= TINY_DOC_THRESHOLD:
+                logger.info(
+                    f"Tiny doc shortcut: {total_chunks} chunks ≤ {TINY_DOC_THRESHOLD}"
+                    f" — fetching all chunks directly (skipping similarity search)."
                 )
-            except Exception as e:
-                # MMK can fail on very small collections — fallback gracefully
-                logger.warning(f"MMR failed ({e}), falling back to similarity search.")
-                docs = vectordb.similarity_search(
+                raw = vectordb.get(where=user_filter)
+                if not raw or not raw.get("documents"):
+                    return {
+                        "answer": "No relevant information found in your documents.",
+                        "sources": [],
+                    }
+                docs = [
+                    Document(page_content=text, metadata=meta)
+                    for text, meta in zip(raw["documents"], raw["metadatas"])
+                ]
+            else:
+            
+                # Dynamic K
+                # Formula: total_chunks // 30, floored at 3, capped at 10.
+                # Examples:
+                #   16–89 chunks  (small/medium doc) → k = 3
+                #   150 chunks    (40-page doc)       → k = 5
+                #   223 chunks    (128-page book)     → k = 7
+                #   500+ chunks   (very large)        → k = 10
+        
+                dynamic_k = min(10, max(3, total_chunks // 30)) if total_chunks > 0 else RETRIEVAL_K
+                logger.info(f"Dynamic K={dynamic_k} (total_chunks={total_chunks})")
+        
+        
+                # MMR retrieval — diverse, non-redundant chunks
+                try:
+                    docs = vectordb.max_marginal_relevance_search(
+                        question,
+                        k=dynamic_k,
+                        fetch_k=dynamic_k * 3,
+                        filter=user_filter,
+                    )
+                except Exception as e:
+                    # MMK can fail on very small collections — fallback gracefully
+                    logger.warning(f"MMR failed ({e}), falling back to similarity search.")
+                    docs = vectordb.similarity_search(
+                        question,
+                        k=dynamic_k,
+                        filter=user_filter,
+                    )   
+            
+                if not docs:
+                    logger.info("No chunks retrieved.")
+                    return {
+                        "answer": "No relevant information found in your documents.",
+                        "sources": [],
+                    }
+                
+                # Relevance scoring + clamping
+                # ChromaDB occasionally returns scores just outside [0, 1] dur to 
+                # floating-point cosine distance normalization (relevance = 1 - distance/2).
+                # Clamping silences the UserWarning without affecting filtering logic.
+                raw_scored = vectordb.similarity_search_with_relevance_scores(
                     question,
                     k=dynamic_k,
                     filter=user_filter,
-                )   
-            
-            if not docs:
-                logger.info("No chunks retrieved.")
-                return {
-                    "answer": "No relevant information found in your documents.",
-                    "sources": [],
-                }
-                
-            # Relevance scoring + clamping
-            # ChromaDB occasionally returns scores just outside [0, 1] dur to 
-            # floating-point cosine distance normalization (relevance = 1 - distance/2).
-            # Clamping silences the UserWarning without affecting filtering logic.
-            raw_scored = vectordb.similarity_search_with_relevance_scores(
-                question,
-                k=dynamic_k,
-                filter=user_filter,
-            )    
-            scored = [(doc, max(0.0, min(1.0, score))) for doc, score in raw_scored]
+                )    
+                scored = [(doc, max(0.0, min(1.0, score))) for doc, score in raw_scored]
+
+                # Log every score for debugging — debug level only so CI stays quiet
+                for doc, score in scored:
+                    logger.debug(
+                        f"Score {score:.3f} | {doc.metadata.get('source')} p{doc.metadata.get('page')} | "
+                        f"{doc.page_content[:80]!r}"
+                        # !r -> tells python to print value using its raw representation method(repr())
+                    ) 
         
-            # Log every score for debugging — debug level only so CI stays quiet
-            for doc, score in scored:
-                logger.debug(
-                    f"Score {score:.3f} | {doc.metadata.get('source')} p{doc.metadata.get('page')} | "
-                    f"{doc.page_content[:80]!r}"
-                    # !r -> tells python to print value using its raw representation method(repr())
-                ) 
-        
-            # Adaptive threshold
-            # Midpoint between mean and max — adapts to each query's score
-            # distribution instead of using a fixed global value.
-            #   threshold = mean + (max - mean) * 0.5
-            # Bounds: floor=0.10, ceil=0.40
+                # Adaptive threshold
+                # Midpoint between mean and max — adapts to each query's score
+                # distribution instead of using a fixed global value.
+                #   threshold = mean + (max - mean) * 0.5
+                # Bounds: floor=0.10, ceil=0.40
             
-            # Edge case: if max_score == 0 (all raw scores were negative,
-            # all clamped to 0), the formula gives threshold=0.10 and
-            # nothing passes. This only happens on tiny collections — which
-            # are now handled by the tiny-doc shortcut above before we get
-            # here. On collections > 15 chunks, genuine near-zero scores
-            # mean the query is truly off-topic, so "no info found" is correct.
-            scores_only = [s for _, s in scored]
-            if scores_only:
-                max_score = max(scores_only)
-                mean_score = sum(scores_only) / len(scores_only)
-                MIN_RELEVANCE = mean_score + (max_score - mean_score) * 0.5
-                MIN_RELEVANCE = max(0.10, min(0.40, MIN_RELEVANCE))
-            else:
-                MIN_RELEVANCE = 0.10
-                max_score = 0.0
-                mean_score = 0.0
+                # Edge case: if max_score == 0 (all raw scores were negative,
+                # all clamped to 0), the formula gives threshold=0.10 and
+                # nothing passes. This only happens on tiny collections — which
+                # are now handled by the tiny-doc shortcut above before we get
+                # here. On collections > 15 chunks, genuine near-zero scores
+                # mean the query is truly off-topic, so "no info found" is correct.
+                scores_only = [s for _, s in scored]
+                if scores_only:
+                    max_score = max(scores_only)
+                    mean_score = sum(scores_only) / len(scores_only)
+                    MIN_RELEVANCE = mean_score + (max_score - mean_score) * 0.5
+                    MIN_RELEVANCE = max(0.10, min(0.40, MIN_RELEVANCE))
+                else:
+                    MIN_RELEVANCE = 0.10
+                    max_score = 0.0
+                    mean_score = 0.0
                        
-            logger.info(f"Adaptive MIN_RELEVANCE={MIN_RELEVANCE:.3f}"
-                        f"(mean={mean_score:.3f}, max={max_score:.3f})")
+                logger.info(f"Adaptive MIN_RELEVANCE={MIN_RELEVANCE:.3f}"
+                            f"(mean={mean_score:.3f}, max={max_score:.3f})")
         
-            docs = [doc for doc, score in scored if score >= MIN_RELEVANCE]
+                docs = [doc for doc, score in scored if score >= MIN_RELEVANCE]
         
-        if not docs:
-            logger.info(f"All chunks below Adaptive MIN_RELEVANCE={MIN_RELEVANCE:.3f}.")
-            return {
-                "answer": "I could not find information related to your question in the uploaded documents.",
-                "sources": [],
-            } 
-               
+            if not docs:
+                logger.info(f"All chunks below Adaptive MIN_RELEVANCE={MIN_RELEVANCE:.3f}.")
+                return {
+                    "answer": "I could not find information related to your question in the uploaded documents.",
+                    "sources": [],
+                } 
+         
+    except Exception as e:
+        logger.error(f"Retrieval failed for user {user_id}: {e}", exc_info=True)
+        return {
+            "answer": "There was a problem retrieving your documents. Please try again in a moment.",
+            "sources" :[],
+        }
+                   
     # Build context
     context = "\n\n".join(doc.page_content for doc in docs)
     logger.info(f"Sending {len(docs)} chunks to LLM.")

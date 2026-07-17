@@ -112,7 +112,7 @@ class TestPromptInstructions:
             assert count > 0, f"BROAD_CHUNK_COUNTS['{query_type}'] = {count}, must be > 0"
             
     def test_factual_not_in_broad_chunk_counts(self):
-        # 'factual' must NOT be in BROAD_CHUNK_COUNTS — it uses MMR retrieval.
+        # 'factual' must NOT be in BROAD_CHUNK_COUNTS — it uses similarity_search_with_relevance_scores() retrieval.
         from services.rag_service import BROAD_CHUNK_COUNTS
         assert "factual" not in BROAD_CHUNK_COUNTS
         
@@ -600,3 +600,69 @@ class TestInvokeWithFallback:
         assert ids[2] == "openai/gpt-oss-20b:free",      "Fallback should be GPT-OSS 20B"
         assert ids[3] == "openrouter/free",               "Emergency should be openrouter/free"
         assert len(ids) == 4,                             "Chain should have exactly 4 models"
+        
+        
+class TestAskQuestionRetrievalErrorHandling:
+    """
+    Tests for try/except wrapping retrieval section of ask_question().
+    Previously any exceptiuon (vhroma failing to open, embedding model raising during question-embedding, corrupted index, etc)
+    propagated all way up as unhandled exception — inconsistent with rest of API's JSON error contract, and genuine 500 with no 
+    graceful degradation.    
+    """
+    def test_vectordb_open_failure_returns_clean_error(self, monkeypatch):
+        # If _get_vectordb() itself raises(e.g. chroma cant open its persistent store — disk issue,
+        # corrupted index, permissions), ask_question() must return a clean error dict, not raise.
+        from services import ask_question
+        
+        def raise_on_open():
+            raise RuntimeError("simulated Chroma open failure")
+        
+        monkeypatch.setattr("services.rag_service._get_vectordb", raise_on_open)
+        
+        result = ask_question("What is backpropagation?", user_id=1)
+        
+        assert "answer" in result
+        assert "sources" in result
+        assert result["sources"] == []
+        assert "problem retrieving" in result["answer"].lower()
+        
+    def test_similarity_search_failure_returns_clean_error(self, monkeypatch):
+        # If vector store opens fine but actual similarity search call raises(e.g. an embedding-computation
+        # error while embedding question), ask_question() must still degrade gracefully rather than propagate.
+        from unittest.mock import MagicMock
+        from services import ask_question
+        
+        mock_vdb = MagicMock()
+        mock_vdb.get.return_value = {"ids": ["1", "2", "3"]}    # looks like real (non-tiny) collection
+        # Force past tiny-doc shortcut so we reach similarity search call
+        mock_vdb.get.return_value = {"ids": [str(i) for i in range(50)]}
+        mock_vdb.similarity_search_with_relevance_scores.side_effect = RuntimeError("simulated embedding/search failure")
+        
+        monkeypatch.setattr("services.rag_service._get_vectordb", lambda: mock_vdb)
+        monkeypatch.setattr("services.rag_service._extract_source_filter", lambda *a, **kw: None)
+        
+        result = ask_question("what is backpropagation?", user_id=1)
+        
+        assert "answer" in result
+        assert "sources" in result
+        assert result["sources"] == []
+        assert "problem retrieving" in result["answer"].lower()
+        
+    def test_retrieval_failure_does_not_affect_legitimate_not_found(self, monkeypatch):
+        # Sanitycheck: Legitimate 'no documents' response (no exception just genuinely empty results)
+        # must still return correct specific message, not generic retrieval-error msg. The try/except must only
+        # catch real exceptions, not normal controlflow.
+        from unittest.mock import MagicMock
+        from services import ask_question
+        
+        mock_vdb = MagicMock()
+        mock_vdb.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+        
+        monkeypatch.setattr("services.rag_service._get_vectordb", lambda: mock_vdb)
+        monkeypatch.setattr("services.rag_service._extract_source_filter", lambda *a, **kw: None)
+        
+        result = ask_question("What is backpropagation?", user_id=999)
+        
+        assert "answer" in result
+        assert "problem retrieving" not in result["answer"].lower()
+        

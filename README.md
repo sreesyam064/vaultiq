@@ -25,7 +25,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 114-test pytest suite and GitHub Actions CI/CD, and Docker containerization.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a 120-test pytest suite and GitHub Actions CI/CD, and Docker containerization.
 
 ---
 
@@ -37,7 +37,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
   - `compare` → broad multi-chunk fetch for topic comparison
   - `concepts` → concept-focused retrieval
   - `interview` → structured Q&A generation
-  - `factual` → MMR similarity search with adaptive threshold
+  - `factual` → similarity search with adaptive threshold
 - **Adaptive retrieval** — dynamic K scaling based on collection size, adaptive relevance threshold that adjusts to document density, tiny-doc shortcut for short documents
 - **Source-aware filtering** — detects filename references in queries and restricts retrieval to that document
 - **Multi-session chat** — create, switch, and search named chat sessions with full history
@@ -45,7 +45,9 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 - **LLM provider abstraction** — Ollama locally, OpenRouter (free tier) in production
 - **4-model fallback chain** — if primary model is rate-limited, automatically tries backup → fallback → emergency
 - **Production hardening** — JWT auth, rate limiting, config validation at startup, retry/timeout on all LLM calls, rotating file logging, `/health` and `/health/deep` endpoints
-- **114-test pytest suite** — unit, integration, and route tests across 3 tiers
+- **Structured JSON logging** — every log line carries `request_id`, `user_id`, timestamp, and processing time, auto-attached with zero per-call effort
+- **Global error handling** — every failure mode (upload, embedding, vector DB, LLM, and anything unexpected) returns a consistnet JSON error; raw exceptions never reach the client.
+- **120-test pytest suite** — unit, integration, and route tests across 3 tiers
 
 ---
 
@@ -132,6 +134,7 @@ vaultiq/
 ├── backend/
 │   ├── app.py                      # Flask app factory, blueprint registration
 │   ├── config.py                   # Config + startup validation
+│   ├── gunicorn.conf.py            # Gunicorn config for backend
 │   ├── llm_provider.py             # LLM factory + 4-model OpenRouter fallback chain
 │   ├── logging_config.py           # Rotating file logging setup
 │   ├── init_db.py                  # Initialize the database
@@ -139,6 +142,7 @@ vaultiq/
 │   ├── .dockerignore
 │   ├── requirements.txt            # Backend-only deps
 │   ├── pytest.ini                  # Test config + warning filters
+│   ├── wsgi.py                     # Entrypoint for Gunicorn (Docker prod only) + initialize db + eager model warmup
 │   │
 │   ├── extensions/                 # Flask extensions
 │   │   ├── db.py                   # SQLAlchemy
@@ -440,7 +444,7 @@ Delete `backend/storage` to clear all uploads, ChromaDB, and SQLite. On next app
 
 ## Testing
 
-VaultIQ has a 3-tier test suite with **112 tests**.
+VaultIQ has a 3-tier test suite with **120 tests**.
 
 ### Tier 1 — Unit tests (fast, no external dependencies)
 
@@ -449,7 +453,7 @@ cd backend
 pytest tests/test_unit_config.py tests/test_unit_rag.py -v
 ```
 
-Covers: config validation, query type detection, retry logic, fallback chain, adaptive threshold, dynamic K, source filter helper, provider factory.
+Covers: config validation, query type detection, retry logic, fallback chain, adaptive threshold, dynamic K, source filter helper, provider factory, and retrieval-layer error handling (vector store open failures and similarity search failures degrade gracefully instead of propagating).
 
 ### Tier 2 — Integration tests (real Chroma, mocked LLM)
 
@@ -458,7 +462,6 @@ pytest tests/test_integration_rag.py -v
 ```
 
 Covers: real PDF ingestion, chunk metadata, user isolation, duplicate guard, broad query retrieval, factual retrieval, citation building, LLM failure handling.
-Covers: auth flow (register/login/profile), duplicate upload detection, session ownership enforcement, input validation, rate limiting, health endpoints.
 
 > Requires HuggingFace embedding model download (~90MB on first run). Run locally before pushing — excluded from CI to keep pipeline fast.
 
@@ -468,13 +471,13 @@ Covers: auth flow (register/login/profile), duplicate upload detection, session 
 pytest tests/test_routes.py -v
 ```
 
-Covers: auth flow, duplicate upload detection, session ownership enforcement, input validation, health endpoints, rate limiting.
+Covers: auth flow, duplicate upload detection, session ownership enforcement, input validation, health endpoints, rate limiting, and global error handlers (JSON 404/405, and a full round-trip confirming an unexpected exception returns a clean JOSN 500 with real exception message never leaking to client).
 
 ### Full suite
 
 ```bash
 pytest tests/ -v
-# 112 passed
+# 120 passed
 ```
 
 ### Test architecture
@@ -482,10 +485,10 @@ pytest tests/ -v
 | Tier            | File                    | Tests   | External deps                | Runs in CI    |
 | --------------- | ----------------------- | ------- | ---------------------------- | ------------- |
 | 1 — Unit        | test_unit_config.py     | 6       | None                         | ✅            |
-| 1 — Unit        | test_unit_rag.py        | 64      | None                         | ✅            |
+| 1 — Unit        | test_unit_rag.py        | 68      | None                         | ✅            |
 | 2 — Integration | test_integration_rag.py | 15      | HuggingFace, ChromaDB        | ❌ local only |
-| 3 — Routes      | test_routes.py          | 29      | Flask only (mocked services) | ✅            |
-| **Total**       |                         | **112** |                              |               |
+| 3 — Routes      | test_routes.py          | 31      | Flask only (mocked services) | ✅            |
+| **Total**       |                         | **120** |                              |               |
 
 ---
 

@@ -78,10 +78,14 @@ LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 LLM_MAX_RETRIES     = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
 # RAG pipeline
-EMBEDDING_MODEL =os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 CHUNK_SIZE      = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "200"))
 RETRIEVAL_K     = int(os.getenv("RETRIEVAL_K", "5"))
+
+# Process embeddings in batches instead of all at once to keep usage low and 
+# avoid OOM crashes when ingesting large PDFs.
+INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "32"))
 
 # Rate limiting
 # Applied to /ask only. Free-tier OpenRouter has per-model daily limits —
