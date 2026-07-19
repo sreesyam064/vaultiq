@@ -438,40 +438,29 @@ def ask_question(question, user_id):
                 dynamic_k = min(10, max(3, total_chunks // 30)) if total_chunks > 0 else RETRIEVAL_K
                 logger.info(f"Dynamic K={dynamic_k} (total_chunks={total_chunks})")
         
-        
-                # MMR retrieval — diverse, non-redundant chunks
-                try:
-                    docs = vectordb.max_marginal_relevance_search(
-                        question,
-                        k=dynamic_k,
-                        fetch_k=dynamic_k * 3,
-                        filter=user_filter,
-                    )
-                except Exception as e:
-                    # MMK can fail on very small collections — fallback gracefully
-                    logger.warning(f"MMR failed ({e}), falling back to similarity search.")
-                    docs = vectordb.similarity_search(
-                        question,
-                        k=dynamic_k,
-                        filter=user_filter,
-                    )   
+                # FIX(memory + retireval): Previously, this ran MMR retrieval first, discarded its results, then queried Chroma again
+                # wih similarity search. This caused duplicate query embeddings and two retrieval calls per question.
             
-                if not docs:
-                    logger.info("No chunks retrieved.")
-                    return {
-                        "answer": "No relevant information found in your documents.",
-                        "sources": [],
-                    }
-                
+                # Use similarity_search_with_relevance_scores() once to get both documents and scores.
+                # Clamp scores to [0, 1] to handle minor Chroma floating-point precision issues and avoid relevance-score warnings.
+            
                 # Relevance scoring + clamping
                 # ChromaDB occasionally returns scores just outside [0, 1] dur to 
                 # floating-point cosine distance normalization (relevance = 1 - distance/2).
                 # Clamping silences the UserWarning without affecting filtering logic.
                 raw_scored = vectordb.similarity_search_with_relevance_scores(
-                    question,
-                    k=dynamic_k,
-                    filter=user_filter,
-                )    
+                        question,
+                        k=dynamic_k,
+                        filter=user_filter,
+                )
+                
+                if not raw_scored:
+                    logger.info("No chunks retrieved.")
+                    return {
+                        "answer": "No relevant information found in your documents.",
+                        "sources": [],
+                    }
+                       
                 scored = [(doc, max(0.0, min(1.0, score))) for doc, score in raw_scored]
 
                 # Log every score for debugging — debug level only so CI stays quiet

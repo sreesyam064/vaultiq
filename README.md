@@ -94,7 +94,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 │                   │                                      │  │
 │                   │  1. _detect_query_type()             │  │
 │                   │  2. _extract_source_filter()         │  │
-│                   │  3. Tiny-doc shortcut / MMR search   │  │
+│                   │  3. Tiny-doc shortcut / similarity   │  │
 │                   │  4. Adaptive relevance threshold     │  │
 │                   │  5. Context + prompt building        │  │
 │                   │  6. LLM call with fallback chain     │  │
@@ -137,7 +137,6 @@ vaultiq/
 │   ├── gunicorn.conf.py            # Gunicorn config for backend
 │   ├── llm_provider.py             # LLM factory + 4-model OpenRouter fallback chain
 │   ├── logging_config.py           # Rotating file logging setup
-│   ├── init_db.py                  # Initialize the database
 │   ├── Dockerfile                  # python:3.12-slim, gunicorn, model pre-baked
 │   ├── .dockerignore
 │   ├── requirements.txt            # Backend-only deps
@@ -247,7 +246,7 @@ ChromaDB — stored with metadata:
   interview)                    │
        │                   Tiny doc? (≤15 chunks)
        │                   Yes → fetch all chunks
-       ▼                   No  → MMR retrieval
+       ▼                   No  → similarity search
   Direct chunk                  │
   fetch (no                 Adaptive threshold
   similarity search)        mean + (max-mean)*0.5
@@ -502,6 +501,8 @@ pytest tests/ -v
 - **Password hashing** via Werkzeug's `generate_password_hash` / `check_password_hash`
 - **Session ownership check** — users can only read their own chat sessions (404 on others)
 - **Rotating log files** — bounded at ~150MB total, logs never contain passwords or JWT tokens
+- **Global exception handler never leaks internals** — any handled exception, anywhere in the app, returns a generic JSON message to the client; the real exception (with full traceback) is captured only in server-side structured logs, tagged with `request_id`/`user_id` for correlation
+- **Consistent JSON error contract** — every response, including 404/405/413/500 and any unexpected failure, is JSON. The client never receives Flask's default HTML error pages or a raw stack trace
 
 ---
 
@@ -513,10 +514,35 @@ pytest tests/ -v
 - **Tiny-doc shortcut** — documents with ≤15 chunks bypass similarity search entirely (fetches all chunks directly) since sparse embedding spaces produce unreliable cosine similarities
 - **Source-aware filtering** — when a filename is mentioned in the query, ChromaDB is filtered to that document only, eliminating cross-document score pollution
 - **Minimal chroma fetches** — metadata-only lookups (filename detection, chunk counting) use `include=["metadatas]` / `include=[]` instead of the default, which otherwise pulls full document text for the entire collection on every single query regardless of relevance
-- **MMR retrieval** — Maximal Marginal Relevance diversifies retrieved chunks so the LLM receives a broader document cross-section rather than near-identical paragraphs
+- **Single-query factual retrieval** — `similarity_search_with_scores()` is called once per question and used directly; an earlier version called `max_marginal_relevance_search()` first and discarded its result (used only for an empty check) before re-querying Chroma a second time for the docs actually used — doubling embedding compute and Chroma I/O per question for no benefit
+- **Batched ingestion embedding** — PDF ingestion embeds and stores chunks in configurable batchs (`INGEST_BATCH_SIZE`, default 32) instead of embedding an entire document's chunks in one call, bounding peak memory during ingestion — this was the confirmed cause of production OOM kills on larger PDFs
 - **HuggingFace model pre-baked into Docker image** — prevents 30-60 second cold-start delay on first request after deploy
 - **Eager model warm-up via `wsgi.py` + gunicorn `preload_app`** — embedding model and LLM client load once in the master process before forking. workers share them via copy-on-write instead of each loading a separate copy
 - **Gunicorn 2 workers** — production WSGI server; capped at 2 to fit Render free-tier RAM (each worker holds the embedding model in memory ~500MB)
+
+---
+
+## Observability & Error Handling
+
+VaultIQ went through a dedicated production-stabilization pass covering structured logging, memory optimization, warning suppression, and error handling — the four things that matter most before trusting an app to run unattended.
+
+### Structured logging
+
+- **Every log line is a single JSON object** — `timestamp`, `level`, `logger`, `message`, `request_id`, `user_id`, `module`, `filename`, `line`, plus any caller-supplied structured fields (e.g. `processing_time_ms`, `pdf_filename`, `chunks`) — not free-text, so logs are directly queryable (`jq`, log aggregation tools) instead of needing regex parsing
+- **`request_id` and `user_id` are attached automatically** to every log line for a request, from any module,with zero per-call effort — generated once in `app.py`'s `before_request` hook and ingested via a `logging.Filter`, not manually threaded through every `logger.info()` call
+  -- **One structured completion line per request** — a dedicated `http.access` logger records `endpoint`, `method`, `status`, `processing_time_ms`, and `remote_addr` for every request; the response also carries an `X-request-ID` header so a specific response can be matched back to its exact log line
+- **Three rotating log files** (`app.log`, `error.log`, `access.log`, 5MB x 5 backups each) — bounded disk usage regardless of uptime
+
+### Production warning suppression
+
+- **Runtime warning filters, not just test-time ones** — `pytest.ini`'s `filterwarnings` only ever applied during `pytest` runs; the actual deployed app was still emitting the same third-party deprecation noise (langchain-comminity's sunset notice, chromadb's UserWarning, PyJWT's key-length warning, SQLAlchemy's legacy API warning) on every startup and every PDF ingest. The same filters are now applied at runtime.
+- **`logging.captureWarnings(True)`** routes any warning _not_ explictly filtered into the same structures JSON logging pipeline instead of leaking raw text to stderr — genuinely new/unexpected warnings stay visible and properly tagged; known noise disappers.
+
+### Error handling
+
+- **Retrieval failures degrade gracefully** — a Chroma open failure, index corruption, or an embedding-computation error while embedding the user's question is caught and returns a clean, generic answer instead of propagating as an unhandled exception
+- **Global exception handler** — `@app.errorhandler(Exception)` catches anything not already handled by a more specific path (upload, embedding, vector DB, and LLM failures each have their own targeted handling); logs the real exception with full traceback server-side only, returns a short, safe, generic JSON message to the client
+- **Consistent JSON error response** for 404 (unknown route), 405 (wrong method), 413 (upload too large), and any unexpected 500 — this is a JSON-only API and every response, success or failure
 
 ---
 
