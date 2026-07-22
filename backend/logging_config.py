@@ -1,41 +1,35 @@
 """
 Logging Configuration
 =====================
-Structured JSON logging for production observanility.
+Structured JSON logging for Docker + Gunicorn deployments.
 
-WHY JSON instead of plain text:
-    Plain text logs ("2026-07-13 10:00:00 INFO app: something happened") are fine to eyeball in a terminal
-    but hard to search, filter, or feed into any log aggregation/analysis tool — even just `jq`/`grep` on raw file.
-    JSON logs are one parseable object per line, so any field (request_id, user_id, status, processing_time_ms) 
-    can be queried directly instead of regex-ing free text.
-    
-Features:
-* Logs are written to the console and persistent files simultaneously.
-* Uses rotating file handlers (5 MB per file, 5 backups each).
-* Supports long-term debugging, auditing, and error tracking.
+Design:
+- JSON logs provide searchable fields such as request_id, user_id, status,
+  and processing_time_ms.
+- stdout (INFO+) and stderr (WARNING+) are the authoritative production
+  destinations and are captured by Docker's logging driver.
+- Rotating file logging is disabled by default because RotatingFileHandler
+  is not process-safe across forked Gunicorn workers. It is available only
+  as an opt-in for local single-process debugging via ENABLE_FILE_LOGGING.
+- RequestContextFilter is attached to each handler, not the root logger,
+  ensuring request_id/user_id are added to records from all child loggers.
+- http.access emits one structured completion record per request; Gunicorn
+  access logging is disabled to avoid duplicate access logs.
 
-Log Files:
-* app.log     : General application activity (INFO and above)
-* error.log   : Warnings, errors, and exceptions (WARNING and above)
-* access.log  : Structured per=request completion logs + raw Werkzeug HTTP lines
-
-Storage:
-* Logs are stored in backend/storage/logs/.
-* When using persistent storage (e.g., Render Persistent Disk), logs survive redeployments and restarts.
-* On ephemeral storage, logs remain available only for the lifetime of the running container.
+Streams:
+    stdout      INFO+ application and access logs (JSON)
+    stderr      WARNING+ errors and exceptions (JSON)
+    files       Optional local-dev rotating logs only
 
 Usage:
 from logging_config import setup_logging
 setup_logging()   # Call once during application startup
 
-```
 import logging
 logger = logging.getLogger(__name__)
 logger.info("plain message")
-
 # Structured extra fields (merged into JSON output automatically):
 logger.info("PDF ingested", extra={"pdf_filename": "notes.pdf", "chunks": 42})
-```
 """
 import logging
 import logging.handlers
@@ -45,7 +39,7 @@ import json
 import warnings
 from datetime import datetime, timezone
 
-from config import LOG_LEVEL, LOG_DIR
+from config import LOG_LEVEL, LOG_DIR, ENABLE_FILE_LOGGING
 
 # Production warnings
 # Suppress known, safe third-party warnings that clutter production logs.
@@ -73,7 +67,7 @@ def _configure_warning_filters():
     
     warnings.filterwarnings("ignore", category=UserWarning, module="jwt")
 
-# Rotation settings
+# Rotation settings (only relevant when ENABLE_FILE_LOGGING=true)
 MAX_BYTES       = 5 * 1024 * 1024   # 5MB
 BACKUP_COUNT    = 5
 
@@ -86,7 +80,7 @@ _STANDARD_LOG_RECORD_ATTS = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
     "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName", 
     "created", "msecs", "relativeCreated", "thread", "threadName", "processName",
-    "process", "message", "asctime", "taskName", "request_id", "user_is", #ingested by RequestContextFilter
+    "process", "message", "asctime", "taskName", "request_id", "user_id", #ingested by RequestContextFilter
 }
 
 
@@ -206,53 +200,76 @@ def setup_logging():
     # Remove any handlers attached by earlier basicconfig calls
     root.handlers.clear()
     
-    # Handler 1 — stdout (keeps terminal + render UI / VPS journal working)
+    # Handler 1 — stdout — authoritative, INFO+
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(level)
     stdout_handler.setFormatter(fmt)
-    root.addHandler(stdout_handler)    
+    stdout_handler.addFilter(request_context_filter)
+    root.addHandler(stdout_handler)   
     
-    # Handler 2 — app.log (INFO+, rotating)
-    app_handler = _make_rotating_handler("app.log", logging.INFO)
-    app_handler.setFormatter(fmt)
-    root.addHandler(app_handler)   
+    # Handler 2: stderr — authoritative, WARNING+ only
+    # Gives "error.log"-equivalent stream without shared file: anyone tailing/greping
+    # container's stderr sees failures only.
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(fmt)
+    stderr_handler.addFilter(request_context_filter)
+    root.addFilter(stderr_handler)
     
-    # Handler 3 — error.log (WARNING+ only — easy to grep for failures)
-    error_handler = _make_rotating_handler("error.log", logging.WARNING)
-    error_handler.setFormatter(fmt)
-    root.addHandler(error_handler)
+    all_handlers = [stdout_handler, stderr_handler]
     
-    # request_id/user_id are injected via a filter attached to the root logger, 
-    # so every handler above (stdout, app.log, error.log) gets them on every record, 
-    # regardless of which module logged it.
-    root.addFilter(request_context_filter)
+    # Optional file handlers (local dev only)
+    if ENABLE_FILE_LOGGING:
+        app_file_handler = _make_rotating_handler("app.log", logging.INFO)
+        app_file_handler.setFormatter(fmt)
+        app_file_handler.addFilter(request_context_filter)
+        root.addHandler(app_file_handler)   
+
+        error_file_handler = _make_rotating_handler("error.log", logging.WARNING)
+        error_file_handler.setFormatter(fmt)
+        error_file_handler.addFilter(request_context_filter)
+        root.addHandler(error_file_handler)
     
-    # Werkzeug access log (HTTP requests)
-    # Werkzeug logs every request as INFO — we capture it into access.log
-    # separately so HTTP traffic doesn't drown out application logs in app.log.
-    access_handler = _make_rotating_handler("access.log", logging.INFO)
-    access_handler.setFormatter(fmt)
-    access_handler.addFilter(request_context_filter)
+        all_handlers.extend([app_file_handler, error_file_handler])
     
+    
+    # Werkzeug access log (HTTP requests) — only fires when using Werkzeug's dev server 
+    # (flask run / app.run()), never under gunicorn, whih handles WSGI protocol itself 
+    # without going through werkzeug's request logging at all.  
     werkzeug_logger = logging.getLogger("werkzeug")
-    werkzeug_logger.propagate = False   # dont also send to root (app.log)
-    werkzeug_logger.addHandler(access_handler)
-    werkzeug_logger.addHandler(stdout_handler)  # still show in terminal
+    werkzeug_logger.propagate = False   # dont also send to root
+    werkzeug_logger.setLevel(logging.INFO)
+    werkzeug_logger.addHandler(stdout_handler)
     
     # Structured per-request logger used by app.py's after_request hook.
-    # Writes to SAME access.log file as werkzeug's raw lines, but each line is fully structured
-    # JSON object with explicit fields.
+    # This is SOLE source of per-request access logging in prod — gunicorn's own 
+    # accesslog is disabled so there is exactly one structured line per request here.
     http_access_logger = logging.getLogger("http.access")
     http_access_logger.propagate = False
-    http_access_logger.addHandler(access_handler)
-    http_access_logger.addHandler(stdout_handler)
     http_access_logger.setLevel(logging.INFO)
+    http_access_logger.addHandler(stdout_handler)
+    
+    if ENABLE_FILE_LOGGING:
+        access_file_handler = _make_rotating_handler("access.log", logging.INFO)
+        access_file_handler.setFormatter(fmt)
+        access_file_handler.addFilter(request_context_filter)
+        http_access_logger.addFilter(access_file_handler)
+        all_handlers.append(access_file_handler)
     
     # Silence noisy third-party libraries
     # These log at DEBUG/INFO by default and drown out application logs.
     for noisy_lib in ("httpx", "chromadb", "sentence_transformers", "urllib3"):
         logging.getLogger(noisy_lib).setLevel(logging.WARNING)
     
-    logging.getLogger(__name__).info(f"Logging configured | level={LOG_LEVEL} | log_dir={LOG_DIR} | format=json")
-    logging.getLogger(__name__).info(f"Log files: app.log (INFO+), error.log (WARNING+), access.log (structured per-request + raw werkzeug HTTP)")
+    logging.getLogger(__name__).info(
+        f"Logging configured | level={LOG_LEVEL} | format=json| "
+        f"destination={'stdout/stderr + files' if ENABLE_FILE_LOGGING else 'stdout/stderr only'}"                                 
+    )
+    if ENABLE_FILE_LOGGING:
+        logging.getLogger(__name__).warning(
+            "ENABLE_FILE_LOGGING=true: writing rotating log files. This is only safe for a "
+            "single-process (non-Gunicorn) run — do NOT enable this under Gunicorn/Docker with "
+            "more than one worker, since RotatingFileHandler is not safe across forked processes."
+        )
+    
     

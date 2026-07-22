@@ -14,8 +14,7 @@ Phase 7: Eager model warm-up via wsgi.py + gunicorn preload_app — duplicate
          model loading across workers and slow first requests
 """
 
-import os
-import uuid
+import os 
 import logging
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -245,10 +244,18 @@ def _get_vectordb():
     )
     
     
-def ingest_pdf(pdf_path, user_id):
+def ingest_pdf(pdf_path, user_id, document_id, filename=None):
     """
     Load a PDF, split into chunks, embed and store in ChromaDB.
     Returns the no.of chunks added (0 if already ingested).
+    
+    document_id is caller-supplied Postgres Document.id (as str or int) — not a uuid minted here.
+    Using same id that identifies row in postgres means one id ties together the postgres row, every 
+    chunk's metadata/vector id in ChromaDB, & object key in R2/local storage, so later delete can find and 
+    remove all three by that single id.
+    
+    filename defaults to os.path.basename(pdf_path) — pass it explictily whenn pdf_path is a temp file whose basename
+    isn't user-facing name.
     
     Duplicate guard: checks ChromaDB before adding anything.
     The upload route also checks the SQL Document table — this is a
@@ -256,6 +263,7 @@ def ingest_pdf(pdf_path, user_id):
     """
     
     filename = os.path.basename(pdf_path)
+    document_id = str(document_id)
     
     # Duplicate guard
     if os.path.exists(CHROMA_DB_PATH):
@@ -282,7 +290,6 @@ def ingest_pdf(pdf_path, user_id):
     chunks = splitter.split_documents(documents)
     
     # Attach metadata to every chunk
-    document_id = str(uuid.uuid4())
     for i, chunk in enumerate(chunks):
         chunk.metadata["source"] = filename
         chunk.metadata["user_id"] = str(user_id)
@@ -310,6 +317,32 @@ def ingest_pdf(pdf_path, user_id):
         
     logger.info(f"Added {len(chunks)} chunks to ChromaDB for '{filename}'.")
     return total
+
+def delete_document_vectors(document_id, user_id):
+    """Remove every chunk belonging to document_id from ChromaDB.
+    
+    Used by:
+        - upload_routes.py, as compensating cleanup if a storage upload or DB commit fails
+        AFTER Chroma ingestion already succeeded
+        - document-delete endpoint, for real user-initiated deletion
+        
+    Scoped by document_id + user_id so a bug elsewhere can't accidentally delete another's
+    user's vectors even if document_id collided
+    """
+    if not os.path.exists(CHROMA_DB_PATH):
+        return 0
+
+    vectordb = _get_vectordb()
+    existing = vectordb.get(
+        where={"$and": [{"user_id": str(user_id)}, {"document_id": str(document_id)}]},
+    )
+    ids = existing.get("ids") if existing else None
+    if not ids:
+        return 0
+    
+    vectordb.delete(ids=ids)
+    logger.info(f"Deleted {len(ids)} chunks for document_id={document_id} (user {user_id}).")
+    return len(ids)
 
 
 def ask_question(question, user_id):

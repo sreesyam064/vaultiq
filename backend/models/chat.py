@@ -1,9 +1,5 @@
 from extensions.db import db
-from datetime import datetime, timezone
-
-
-def _utcnow():
-    return datetime.now(timezone.utc)
+from models._timestamps import utcnow
 
 class ChatSession(db.Model):
     
@@ -16,8 +12,9 @@ class ChatSession(db.Model):
     
     user_id = db.Column(
         db.Integer,
-        db.ForeignKey("users.id"),
-        nullable=False
+        db.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     
     title = db.Column(
@@ -25,15 +22,19 @@ class ChatSession(db.Model):
         nullable=True
     )
     
-    created_id = db.Column(
-        db.DateTime,
-        default=_utcnow
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=db.func.now(),
     )
     
     messages = db.relationship(
         "Message",
         backref="session",
-        lazy=True
+        lazy=True,
+        cascade="all, delete-orphan",
+        order_by="Message.timestamp",
     )
     
     
@@ -48,8 +49,9 @@ class Message(db.Model):
     
     session_id = db.Column(
         db.Integer,
-        db.ForeignKey("chat_sessions.id"),
-        nullable=False
+        db.ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     
     role = db.Column(
@@ -63,7 +65,9 @@ class Message(db.Model):
     )
     
     timestamp = db.Column(
-        db.DateTime,
-        default=_utcnow
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=db.func.now(),
     )
     

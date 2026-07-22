@@ -83,7 +83,7 @@ def login_user(email, password):
 # Chat Session APIs
 def create_session(token):
     headers = {"Authorization": f"Bearer {token}"}
-    response = _request("GET", f"{BASE_URL}/chat/session", timeout=SHORT_TIMEOUT, headers=headers)
+    response = _request("POST", f"{BASE_URL}/chat/session", timeout=SHORT_TIMEOUT, headers=headers)
     response.raise_for_status()
     return response.json()
 

@@ -37,9 +37,11 @@ preload_app = True
 timeout = int(os.getenv("GUNICORN_TIMEOUT", "300"))
 
 # Logging
-# "-" means stdout/stderr — picked up by rotating file handlers in logging_config.py
-# via Python's root logger, and by render's log viewer.
-accesslog = "-"
+# App-level access logging already emits one structured JSON record per request
+# via http.access, so Gunicorn access logs are disabled to avoid duplicates.
+# Gunicorn error logs remain enabled for worker/master lifecycle events such as
+# startup, crashes, signals, and worker timeouts that application logging cannot capture.
+accesslog = None
 errorlog = "-"
 
 def post_fork(server, worker):

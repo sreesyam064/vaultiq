@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 import logging
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -15,7 +16,8 @@ auth_bp = Blueprint("auth", __name__)
 @auth_bp.route("/register", methods=["POST"])
 @limiter.limit(AUTH_RATE_LIMIT)
 def register():
-    data = request.get_json()
+    # request.get_json() (crashes/AttributeErrors on non-JSON bodies)
+    data = request.get_json(silent=True) or {}
     
     username = data.get("username")
     email = data.get("email")
@@ -43,7 +45,17 @@ def register():
     )
     
     db.session.add(new_user)
-    db.session.commit()
+    try:
+        db.session.commit()   
+    except IntegrityError:
+        # A concurrent request won username/email uniqueness race between
+        # our pre-checks above this commit.
+        db.session.rollback()
+        return jsonify({"error": "Username or email already exists"}), 409
+    except Exception as e:
+        db.session.riollback()
+        logger.error(f"Registration commit failed for username='{username}': {e}", exc_info=True)
+        return jsonify({"error": "Failed to register. Please try again"}), 500
     
     return jsonify({"message": "User registered successfully"}), 201
     
@@ -51,7 +63,7 @@ def register():
 @auth_bp.route("/login", methods=["POST"])
 @limiter.limit(AUTH_RATE_LIMIT)
 def login():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     
     email = data.get("email")
     password = data.get("password")

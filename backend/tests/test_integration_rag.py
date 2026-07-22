@@ -32,14 +32,14 @@ class TestIngestPdf:
     def test_ingest_returns_chunk_count(self, fixture_pdf, chroma_dir):
         # Ingesting a 3-page PDF should produce > 0 chunks.
         from services import ingest_pdf
-        count = ingest_pdf(fixture_pdf, user_id=1)
+        count = ingest_pdf(fixture_pdf, user_id=1, document_id=1)
         assert count > 0, "Expected at least 1 chunk from a 3-page PDF"
         
     def test_ingest_chunk_metadata_fields(self, fixture_pdf, chroma_dir):
         # Every chunk must carry source, user_id, document_id, chunk_index.
         from services.rag_service import ingest_pdf, _get_vectordb
         
-        ingest_pdf(fixture_pdf, user_id=42)
+        ingest_pdf(fixture_pdf, user_id=42, document_id=42)
         
         vectordb = _get_vectordb()
         result = vectordb.get(where={"user_id": "42"})
@@ -62,7 +62,7 @@ class TestIngestPdf:
         """
         from services.rag_service import ingest_pdf, _get_vectordb
         
-        ingest_pdf(fixture_pdf, user_id=1)
+        ingest_pdf(fixture_pdf, user_id=1, document_id=1)
         
         vectordb = _get_vectordb()
         user1_data = vectordb.get(where={"user_id": "1"})
@@ -78,8 +78,8 @@ class TestIngestPdf:
         """
         from services.rag_service import ingest_pdf, _get_vectordb
         
-        first_count = ingest_pdf(fixture_pdf, user_id=1)
-        second_count = ingest_pdf(fixture_pdf, user_id=1)
+        first_count = ingest_pdf(fixture_pdf, user_id=1, document_id=1)
+        second_count = ingest_pdf(fixture_pdf, user_id=1, document_id=1)
         
         assert first_count > 0, "First ingest should return chunk count > 0"
         assert second_count == 0, "Second ingest (duplicate) should return 0"
@@ -95,8 +95,8 @@ class TestIngestPdf:
         # Same filename uploaded by two differnt users — both should be ingested.
         from services.rag_service import ingest_pdf
         
-        count_user1 = ingest_pdf(fixture_pdf, user_id=10)
-        count_user2 = ingest_pdf(fixture_pdf, user_id=20)
+        count_user1 = ingest_pdf(fixture_pdf, user_id=10, document_id=10)
+        count_user2 = ingest_pdf(fixture_pdf, user_id=20, document_id=20)
         
         assert count_user1 > 0, "User 10 ingest shoul succeed"
         assert count_user2 > 0, "User 20 ingest should succeed (different user, same file)"
@@ -105,7 +105,7 @@ class TestIngestPdf:
         # All chunk IDs in Chroma must be unique — no silent overwrites.
         from services.rag_service import ingest_pdf, _get_vectordb
         
-        ingest_pdf(fixture_pdf, user_id=1)
+        ingest_pdf(fixture_pdf, user_id=1, document_id=1)
         result = _get_vectordb().get(where={"user_id": "1"})
         
         ids = result["ids"]
@@ -126,7 +126,7 @@ class TestAskQuestion:
         listing it in eacj test's parameters.
         """
         from services.rag_service import ingest_pdf
-        ingest_pdf(fixture_pdf, user_id=1)
+        ingest_pdf(fixture_pdf, user_id=1, document_id=1)
         
     # Broad query types
     @pytest.mark.parametrize("question, expected_type", [

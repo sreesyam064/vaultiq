@@ -1,10 +1,13 @@
+import logging
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from extensions import db, limiter
 from models import Document, ChatSession, Message   
 from services import ask_question
 from config import ASK_RATE_LIMIT
+
+logger = logging.getLogger(__name__)
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -16,7 +19,12 @@ def create_session():
     
     session = ChatSession(user_id=current_user_id)
     db.session.add(session)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to create chat session for user {current_user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Failed to create session. Please try again."}), 500
     
     return jsonify({"session_id": session.id}), 201
     
@@ -29,7 +37,7 @@ def get_chat(session_id):
     if not session or session.user_id != current_user_id:
         return jsonify({"error": "Session not found"}), 404
     
-    messages = Message.query.filter_by(session_id=session_id).all()
+    messages = Message.query.filter_by(session_id=session_id).order_by(Message.timestamp).all()
     
     history = [
         {"role": msg.role, "content": msg.content}
@@ -44,7 +52,7 @@ def get_chat(session_id):
 def get_sessions():
     current_user_id = int(get_jwt_identity())
     
-    sessions = ChatSession.query.filter_by(user_id=current_user_id).order_by(ChatSession.created_id.desc()).all()
+    sessions = ChatSession.query.filter_by(user_id=current_user_id).order_by(ChatSession.created_at.desc()).all()
     
     result = [
         {"id": s.id, "title": s.title}
@@ -60,7 +68,7 @@ def get_sessions():
 @jwt_required()
 @limiter.limit(ASK_RATE_LIMIT)
 def ask():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     
     session_id = data.get("session_id")
     question = data.get("question")
@@ -78,8 +86,12 @@ def ask():
     if not session or session.user_id != current_user_id:
         return jsonify({"error": "Session not found"}), 404
     
-    # Check user has at least one document uploaded
-    has_docs = Document.query.filter_by(user_id=current_user_id).first()
+    # Check user has at least one document uploaded & actually available —
+    # excludes documents currently mid-deletion (deletion_status="deleting"),
+    # whose vectors may already be gone from Chroma even though status="ready".
+    has_docs = Document.query.filter_by(
+        user_id=current_user_id, status="ready", deletion_status="active"
+    ).first()
     if not has_docs:
         return jsonify({"error": "No documents uploaded. Please upload a PDF first."}), 400
     
@@ -95,9 +107,21 @@ def ask():
     if session.title is None:
         session.title = question[:40]
         
-    # Call RAG service
-    result = ask_question(question, current_user_id)
-    
+    # Call RAG service (hits Chroma + OpenRouter over the network) — a
+    # failure here must not bubble up as an unhandled 500 with user's question
+    # already silently dropped.
+    try:
+        result = ask_question(question, current_user_id)
+    except Exception as e:
+        db.session.rollback()
+        logger.error(
+            f"ask_question failed for user {current_user_id}, session {session_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify({
+            "error": "Failed to get an answer right now. Please try again.",
+        }), 502
+        
     # Save assistant message
     assistant_message = Message(
         session_id=session_id,
@@ -105,7 +129,15 @@ def ask():
         content=result["answer"]
     )
     db.session.add(assistant_message)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        logger.error(
+            f"Failed to save chat messages for user {current_user_id}, session {session_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify({"error": "Answer generated but failed to save. Please try again."}), 500
     
     return jsonify(result), 200
                

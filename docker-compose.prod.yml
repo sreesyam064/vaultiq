@@ -34,9 +34,20 @@ services:
     ports:
       - "5000:5000"
     environment:
+      APP_ENV: production
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env.prod}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env.prod}
       HF_TOKEN: ${HF_TOKEN}
+
+      # Neon Postgres (falls back to local SQLite If unset, config.py) — but for real prod
+      # have to set this. Run `flask db upgrade` once against a fresh Neon DB before first boot.
+      DATABASE_URL: ${DATABASE_URL}
+
+      # Cloudflare R2 (falls back to local disk if unset)
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
 
       # Prod LLM — OpenRouter API. No Ollama, no GPU needed.
       # 4-model fallback chain (gemma -> gpt-oss-120b -> gpt-oss-20b -> openrouter/free)
@@ -68,7 +79,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 90s
     # Prod: always restart on crash — no human watching the terminal.
     restart: unless-stopped
     deploy:
@@ -76,7 +87,7 @@ services:
         limits:
           # 2 gunicorn workers * ~180MB each + OS overhead ≈ 420MB.
           # Cap at 450MB to stay within Render free tier's 512MB RAM.
-          memory: 450M
+          memory: 2024M
 
   # frontend (Streamlit)
   frontend:

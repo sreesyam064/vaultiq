@@ -1,34 +1,43 @@
+# Versions pinned for reproducible ARM64 (Oracle/AWS Graviton) builds.
+# Verify with: docker buildx build --platform linux/arm64 -t backend-arm-test ./backend
+# If you bump any version here, re-run that build before committing.
+
 # Web Framework
-flask
-flask-sqlalchemy
-flask-jwt-extended
-flask-limiter
-werkzeug
-gunicorn
+flask==3.1.3
+flask-sqlalchemy==3.1.1
+flask-jwt-extended==4.7.4
+flask-limiter==4.1.1
+werkzeug==3.1.8
+gunicorn==26.0.0
 
 # Database
-sqlalchemy
+sqlalchemy==2.0.51
+flask-migrate==4.1.0
+psycopg[binary]==3.3.4
+
+# Object storage (Cloudflare R2 - S3-compatible)
+boto3==1.43.53
 
 
 # LangChain + LLM providers
-langchain
-langchain-community
-langchain-core
-langchain-text-splitters
-langchain-chroma
-langchain-huggingface
-langchain-ollama
-langchain-openai
+langchain==1.3.14
+langchain-community==0.4.2
+langchain-core==1.5.0
+langchain-text-splitters==1.1.2
+langchain-chroma==1.1.0
+langchain-huggingface==1.2.2
+langchain-ollama==1.1.0
+langchain-openai==1.4.0
 
 
 # Vector store + embeddings
-chromadb
-sentence-transformers
-
+chromadb==1.5.9
+sentence-transformers==5.6.0
+torch==2.13.0
 
 # PDF loading
-pypdf
+pypdf==6.14.2
 
 
 # Config
-python-dotenv
+python-dotenv==1.2.2

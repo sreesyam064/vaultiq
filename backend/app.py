@@ -14,6 +14,7 @@ from config import (
     JWT_SECRET_KEY,
     SQLALCHEMY_DATABASE_URI,
     SQLALCHEMY_TRACK_MODIFICATIONS,
+    SQLALCHEMY_ENGINE_OPTIONS,
     UPLOAD_FOLDER,
     MAX_UPLOAD_SIZE_BYTES,
     validate_config,
@@ -22,7 +23,7 @@ from config import (
 # fail fast on bad config instead of crashing deep inside a request
 validate_config()   
 
-from extensions import db, jwt, limiter
+from extensions import db, jwt, limiter, migrate
 
 from routes import auth_bp, chat_bp, upload_bp, health_bp
 
@@ -38,10 +39,13 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = SQLALCHEMY_TRACK_MODIFICATIONS
 # To limit server-side size to eliminate taking down disk/memory by large request body before app code even run
 # MAX_CONTENT_LENGTH enforced by werkzeug at WSGI layer, before flask parses request body at all.
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE_BYTES
+# pool_pre_ping, pool_recycle for Postgres (Neon), no-op on SQLite.
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = SQLALCHEMY_ENGINE_OPTIONS
 
 db.init_app(app)
 jwt.init_app(app)
 limiter.init_app(app)
+migrate.init_app(app, db)
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(upload_bp)
@@ -73,7 +77,7 @@ def _start_request_context():
             g.user_id = identity
     except Exception:
         # Invalid/expired token on request that doesn't strictly require auth — leave
-        # user_id as None, let route's own @jey_required() (if any) handle rejecting request properly.
+        # user_id as None, let route's own @jwt_required() (if any) handle rejecting request properly.
         pass
 
 
