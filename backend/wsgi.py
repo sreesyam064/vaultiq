@@ -20,6 +20,7 @@ Usage (see gunicorn.conf.py and Dockerfile CMD):
 """
 import logging
 
+from app import app  # noqa: F401  # Exposed for Gunicorn (wsgi:app)
 from services import _get_embedding_model, _get_llm
 
 logger = logging.getLogger(__name__)
