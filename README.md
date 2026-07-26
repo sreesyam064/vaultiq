@@ -1,5 +1,4 @@
 <div align="center">
-
 # 🧠 VaultIQ
 
 ### Personal Knowledge Base Assistant
@@ -17,6 +16,8 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 [Overview](#overview) • [Features](#key-features) • [Tech Stack](#tech-stack) • [Setup](#installation--setup) • [Testing](#testing) • [Deployment](#cicd--deployment)
+
+#### 🌐 Live Demo: 🔗 https://vault-iq.in
 
 </div>
 
@@ -688,8 +689,6 @@ push / PR
            SSH in, pull new images, run `flask db upgrade`,
            bring the stack up, health-check the live domain
 ```
-
-CI currently covers lint + test only. `docker-compose.prod.yml` already pulls pre-built, tagged images from GHCR (see below) — but nothing in this repo yet builds and pushes those images automatically, and there's no automated deploy-to-EC2 step. Until that's wired up (tracked in [Project Status](#project-status)), a deploy is a manual `docker build` + tag + push to GHCR, followed by `docker compose pull` + `up` on the server.
 
 ### Production Deployment (AWS)
 

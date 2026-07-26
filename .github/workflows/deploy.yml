@@ -16,18 +16,18 @@
 # SECRETS NEEDED (repo Settings -> Secrets and variables -> Actions):
 #   GHCR_PAT      — PAT with read:packages (write:packages not needed here —
 #                   pushing in the `build` job authenticates via GITHUB_TOKEN,
-#                   not GHCR_PAT; GHCR_PAT is only for the VPS's pull in `deploy`)
-#   VPS_HOST      — EC2 Elastic IP or domain
-#   VPS_SSH_KEY   — private key matching the vaultiq-prod-key pair
-#   (DATABASE_URL / R2 / OPENROUTER creds live in .env.prod ON the VPS,
+#                   not GHCR_PAT; GHCR_PAT is only for the EC2's pull in `deploy`)
+#   EC2_HOST      — EC2 Elastic IP or domain
+#   EC2_SSH_KEY   — private key matching the vaultiq-prod-key pair
+#   (DATABASE_URL / R2 / OPENROUTER creds live in .env.prod ON the EC2,
 #    never as GitHub secrets — the deploy step never touches them directly)
 
-# ONE-TIME VPS PREREQUISITES (not handled by this workflow — do before first run):
+# ONE-TIME EC2 PREREQUISITES (not handled by this workflow — do before first run):
 #   - docker volume create certbot-etc && docker volume create certbot-webroot
 #   - Obtain the first TLS cert via docker-compose.bootstrap.yml (see its
 #     header comment) before docker-compose.prod.yml's nginx service can
 #     start successfully — it expects a cert to already exist.
-#   - /opt/vaultiq/.env.prod must exist on the VPS (see .env.prod.example)
+#   - /opt/vaultiq/.env.prod must exist on the EC2 (see .env.prod.example)
 
 name: Deploy
 
@@ -126,10 +126,11 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor}}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push backend
@@ -157,9 +158,9 @@ jobs:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.VPS_HOST }}
+          host: ${{ secrets.EC2_HOST }}
           username: ubuntu
-          key: ${{ secrets.VPS_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
 
