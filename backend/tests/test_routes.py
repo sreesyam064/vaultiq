@@ -20,7 +20,6 @@ whats tested:
 import os
 import sys
 import io
-import pytest
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
@@ -287,7 +286,6 @@ class TestUploadRoute:
             data={"file": (io.BytesIO(pdf_bytes), "storagefail.pdf")},
             content_type="multipart/form-data"
         )
-        data = resp.get_json()
 
         assert resp.status_code == 500
         assert len(cleanup_calls) == 1, "delete_document_vectors must be called after a storage failure"
@@ -373,7 +371,6 @@ class TestChatRoutes:
         # Add a document record so the "no docs" guard passes
         from models import Document
         from extensions import db
-        from flask import current_app
             
         with client.application.app_context():
             from flask_jwt_extended import decode_token
@@ -527,7 +524,6 @@ R2 network calls are mocked at the storage-client boundary so storage
 logic and compensating cleanup are still exercised without requiring
 live Cloudflare credentials.
 """
-from unittest.mock import MagicMock
 
 class TestStorageFailureCases:
     

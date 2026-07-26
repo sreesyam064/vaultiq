@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
-from config import UPLOAD_FOLDER, MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB, MAX_FILES_PER_UPLOAD
+from config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB, MAX_FILES_PER_UPLOAD
 from extensions import db
 from models import Document
 from services import (
@@ -314,7 +314,7 @@ def _upload_single_file(file, current_user_id):
     document.status = "ready"
     try:
         db.session.commit()
-    except Exception as e:
+    except Exception:
         # Both Chroma AND storage already succeeded — roll both back so
         # the failed DB commit doesn't leave orphans in either place.
         logger.error(

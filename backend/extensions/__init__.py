@@ -1,4 +1,4 @@
-from .db import db
-from .jwt import jwt
-from .limiter import limiter
-from .migrate import migrate
+from .db import db as db
+from .jwt import jwt as jwt
+from .limiter import limiter as limiter
+from .migrate import migrate as migrate

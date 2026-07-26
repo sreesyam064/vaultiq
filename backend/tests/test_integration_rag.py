@@ -156,7 +156,6 @@ class TestAskQuestion:
         that's the original bug (no chunk matches 'summarize my document')
         """
         from services.rag_service import ask_question, _get_vectordb
-        from langchain_chroma import Chroma
             
         called = []
             

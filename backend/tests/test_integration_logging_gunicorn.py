@@ -15,7 +15,6 @@ Skipped when Gunicorn or the full application dependency stack is unavailable.
 
 """
 import os
-import sys
 import json
 import time
 import shutil
@@ -59,8 +58,8 @@ def gunicorn_server(tmp_path_factory):
 
     env = os.environ.copy()
     env.update({
-        "SECRET_KEY": "test-secret",
-        "JWT_SECRET_KEY": "test-jwt-secret",
+        "SECRET_KEY": "test-secret-key-at-least-32-bytes",
+        "JWT_SECRET_KEY": "test-jwt-secret-key-at-least-32-bytes",
         "LLM_PROVIDER": "ollama",
         "APP_ENV": "development",
         "GUNICORN_WORKERS": "2",
@@ -125,7 +124,7 @@ class TestGunicornLoggingAfterFork:
         time.sleep(1)
 
         lines = _read_json_lines(gunicorn_server["stdout_path"])
-        access_lines = [l for l in lines if l.get("logger") == "http.access"]
+        access_lines = [line for line in lines if line.get("logger") == "http.access"]
 
         assert len(access_lines) == 5, (
             f"expected exactly 5 http.access lines for 5 requests, got {len(access_lines)} "

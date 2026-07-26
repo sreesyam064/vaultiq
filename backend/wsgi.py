@@ -20,7 +20,6 @@ Usage (see gunicorn.conf.py and Dockerfile CMD):
 """
 import logging
 
-from app import app
 from services import _get_embedding_model, _get_llm
 
 logger = logging.getLogger(__name__)

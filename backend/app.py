@@ -1,13 +1,12 @@
-import os
 import time
 import uuid
 import logging
 
 from flask import Flask, jsonify, g, request
-from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 
 from logging_config import setup_logging
-setup_logging()
+
 
 from config import ( 
     SECRET_KEY,
@@ -19,13 +18,12 @@ from config import (
     MAX_UPLOAD_SIZE_BYTES,
     validate_config,
 )
+from extensions import db, jwt, limiter, migrate
+from routes import auth_bp, chat_bp, upload_bp, health_bp
 
+setup_logging()
 # fail fast on bad config instead of crashing deep inside a request
 validate_config()   
-
-from extensions import db, jwt, limiter, migrate
-
-from routes import auth_bp, chat_bp, upload_bp, health_bp
 
 logger = logging.getLogger(__name__)
 

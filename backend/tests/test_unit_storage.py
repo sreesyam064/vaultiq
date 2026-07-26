@@ -7,7 +7,6 @@ No network, no real R2 bucket — R2 path is verified by mocking boto3.
 
 import os
 import sys
-import pytest
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:

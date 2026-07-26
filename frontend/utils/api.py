@@ -50,7 +50,7 @@ def _request(method, url, timeout, **kwargs):
 
     except requests.exceptions.ConnectionError:
         raise Exception(
-            f"Could not reach the VaultIQ backend. "
+            "Could not reach the VaultIQ backend. "
             "Please check your connection and try again."
         )  
 

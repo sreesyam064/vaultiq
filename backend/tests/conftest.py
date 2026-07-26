@@ -65,8 +65,8 @@ def app(tmp_path_factory):
         "TESTING":                  True,
         # The correct in-memory SQLite URI is "sqlite:///:memory:" (three slashes, trailing colon)
         "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
-        "JWT_SECRET_KEY":           "test-jwt-secret",
-        "SECRET_KEY":               "test-secret-key",
+        "JWT_SECRET_KEY":           "test-jwt-secret-key-at-least-32-bytes",
+        "SECRET_KEY":               "test-secret-key-at-least-32-bytes",
         "RATELIMIT_ENABLED":        False, # disable rate limiting in tests
     })
     
