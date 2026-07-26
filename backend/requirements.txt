@@ -41,3 +41,7 @@ pypdf==6.14.2
 
 # Config
 python-dotenv==1.2.2
+
+# Testing
+pytest==9.1.1
+pytest-mock==3.15.1

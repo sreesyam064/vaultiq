@@ -1,104 +1,69 @@
-# VaultIQ — Production Environment
+# VaultIQ — Production Environment (AWS EC2)
 
-# Self-contained prod stack. No Ollama — uses OpenRouter API.
-# Requires OPENROUTER_API_KEY in .env.prod.
+# Pulls pre-built images from GHCR (built + pushed by .github/workflows/deploy.yml
+# on every push to main) — this file does NOT build images locally. No Ollama —
+# uses OpenRouter API. Nginx terminates TLS and is the only service reachable
+# from outside the Docker host; backend/frontend are internal-network-only.
 
-# USAGE:
-#   docker compose -f docker-compose.prod.yml --env-file .env.prod up --build
+# PREREQUISITES (one-time, before first run — see docker-compose.bootstrap.yml):
+#   docker volume create certbot-etc
+#   docker volume create certbot-webroot
+#   A cert must already exist in certbot-etc (obtained via the bootstrap
+#   compose file) — nginx below expects one and won't start cleanly without it.
 
-# DAILY DEV USAGE:
-#   Start   : docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-#   Stop    : docker compose -f docker-compose.prod.yml down
-#   Reset   : docker compose -f docker-compose.prod.yml down -v (wipes volumes)
-#   Logs    : docker compose -f docker-compose.prod.yml logs -f
+# USAGE (this is what .github/workflows/deploy.yml runs on the VPS, commands below are for manual/local use):
+#   Pull      : docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+#   Migrate   : docker compose -f docker-compose.prod.yml --env-file .env.prod run --rm backend flask db upgrade
+#   Start     : docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#   Stop      : docker compose -f docker-compose.prod.yml down
+#   Reset     : docker compose -f docker-compose.prod.yml down -v   (wipes named volumes — NOT certbot-etc/webroot, those are external)
+#   Logs      : docker compose -f docker-compose.prod.yml logs -f
 
-# ACCESS:
-#   Frontend    : http://localhost:8501
-#   Backend API : http://localhost:5000
-#   Health      : http://localhost:5000/health
-#   Health deep : http://localhost:5000/health/deep
-
-# NOTE:
-#   On Render, docker-compose is not used — Render builds directly from
-#   backend/Dockerfile and frontend/Dockerfile via render.yaml.
-#   This file is for simulating the production environment locally before
-#   deploying, so you can catch config issues without a Render redeploy.
+# ACCESS (all traffic goes through nginx — backend/frontend have no published
+# host ports and are unreachable directly, by design):
+#   App          : https://vault-iq.in
+#   Health       : https://vault-iq.in/health
+#   Health deep  : https://vault-iq.in/health/deep
 
 services:
-  # Backend (Flask API — prod settings)
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: vaultiq_backend_prod
-    ports:
-      - "5000:5000"
-    environment:
-      APP_ENV: production
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env.prod}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env.prod}
-      HF_TOKEN: ${HF_TOKEN}
-
-      # Neon Postgres (falls back to local SQLite If unset, config.py) — but for real prod
-      # have to set this. Run `flask db upgrade` once against a fresh Neon DB before first boot.
-      DATABASE_URL: ${DATABASE_URL}
-
-      # Cloudflare R2 (falls back to local disk if unset)
-      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
-      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
-      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
-      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
-
-      # Prod LLM — OpenRouter API. No Ollama, no GPU needed.
-      # 4-model fallback chain (gemma -> gpt-oss-120b -> gpt-oss-20b -> openrouter/free)
-      # is handled automatically in llm_provider.py.
-      LLM_PROVIDER: openrouter
-      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-31b-it:free}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be set in .env.prod}
-
-      # Prod tuning:
-      # - shorter timeout: API calls are fast(2-10s vs local 30-120s)
-      # - 2 retries: handles transient API errors before falling back to next model
-      # - stricter rate limit: to protect OpenRouter free-tier quota.(200 req/day)
-      # - INFO logging: no debug noise in production logs
-      LLM_TIMEOUT_SECONDS: 30
-      LLM_MAX_RETRIES: 2
-      ASK_RATE_LIMIT: 10 per minute
-      LOG_LEVEL: INFO
-      # Gunicorn worker timeout (gunicorn.conf.py reads this).
-      # Worst case: 4-model fallback chiain x (LLM_MAX_RETRIES+1) attempts x LLM_TIMEOUT_SECONDS,
-      # plus backoff delays, can approach ~300-370s if every model hits a transient (non-429) failure.
-      # Set comfortably above that as a slow-but-successful fallback chain isn't killed mid-recovery.
-      GUNICORN_TIMEOUT: 400
+    image: ghcr.io/sreesyam064/vaultiq-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # t4g.medium has 4GB total, shared with frontend + nginx + OS/Docker overhead.
+    # 2 gunicorn workers + embedding model (~180MB each) + OS overhead.
+    mem_limit: 768m
+    expose:
+      - "5000"
+    env_file:
+      - ../.env.prod
     volumes:
-      # Named volume for persistent data (uploads, ChromaDB, and SQLite, logs)
-      # _prod suffix keeps prod data fully separate from dev data.
-      - backend_storage:/app/storage
+      # Single bind mount — matches config.py's STORAGE_URL (/app/storage inside
+      # the container), covering uploads/, vector_db/chroma_db/,database/, logs/ all
+      # at once. In production STORAGE_BACKEND=r2 so uploads/ and database/
+      # stay empty (R2 + Neon are the real stores) — only vector_db/ actually
+      # matters here, but mounting the whole tree is simpler and harmless.
+      - /mnt/data/storage:/app/storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s
-    # Prod: always restart on crash — no human watching the terminal.
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          # 2 gunicorn workers * ~180MB each + OS overhead ≈ 420MB.
-          # Cap at 450MB to stay within Render free tier's 512MB RAM.
-          memory: 2024M
+      start_period: 90s # matches the Dockerfile's own start_period — model warmup on boot
+    networks:
+      - internal
 
-  # frontend (Streamlit)
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: vaultiq_frontend_prod
-    ports:
-      - "8501:8501"
+    image: ghcr.io/sreesyam064/vaultiq-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    mem_limit: 384m
+    expose:
+      - "8501"
+    env_file:
+      - ../.env.prod
     environment:
-      BACKEND_URL: http://backend:5000
+    # Container-to-container call over the internal Docker network — never touches
+    # nginx or the public internet.
+      - BACKEND_URL=http://backend:5000
     depends_on:
       backend:
         condition: service_healthy
@@ -108,11 +73,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - internal
+  
+  nginx:
+    image: nginx:alpine
     restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/prod.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - internal 
 
-# Named volumes
-# _prod suffix keeps prod data fully separate from dev data.
-# No ollama_models — prod uses OpenRouter, no local model storage needed.
+networks:
+  internal:
+    driver: bridge
+
 volumes:
-  backend_storage:
-    name: vaultiq_backend_storage_prod
+  certbot-etc:
+    external: true
+  certbot-webroot:
+    external: true
+

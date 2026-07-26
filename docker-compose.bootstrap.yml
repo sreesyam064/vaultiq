@@ -1,0 +1,61 @@
+# One-time TLS bootstrap: serves the ACME HTTP-01 challenge just long enough to
+# obtain first certificate, before docker-compose.prod.yml's real nginx (which expects
+# a cert to already exist) takes over port 80/443.
+
+# PREREQUISITES:
+#   DNS must already resolve:
+#      vault-iq.in      -> EC2 Elastic IP
+#      www.vault-iq.in  -> vault-iq.in
+
+# AWS Security Group must allow:
+#     TCP 80  from 0.0.0.0/0
+#     TCP 443 from 0.0.0.0/0
+
+# Run once before obtaining the first certificate:
+#   docker volume create certbot-etc
+#   docker volume create certbot-webroot
+
+# USAGE:
+#   1. Start temporary HTTP-only Nginx:
+#       docker compose -f docker-compose.bootstrap.yml up -d nginx-bootstrap
+#   2. Obtain one certificate covering both hostnames:
+#       docker compose -f docker-compose.bootstrap.yml run --rm certbot certonly \
+#       --webroot -w /var/www/certbot \
+#       -d vault-iq.in \
+#       -d www.vault-iq.in \
+#       --email sreesyam06@gmail.com \
+#       --agree-tos  \
+#       --no-eff-email
+#   IMPORTANT:
+#     vault-in is intentionally the FIRST -d argument.
+#     Certbot therefore creates:
+#       /etc/letsencrypt/live/vault-iq-in/
+#     whivh matches nginx/prod.conf.
+
+#   3. Stop bootstrap Nginx:
+#       docker compose -f docker-compose.bootstrap.yml down
+#       
+# The certbot-etc and certbot-webroot volumes are shared with docker-compose.prod.yml.
+
+services:
+  nginx-bootstrap:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/bootstrap.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot-webroot:/var/www/certbot
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot-webroot:/var/www/certbot
+      - cert-etc:/etc/letsencrypt
+
+volumes:
+  certbot-webroot:
+    external: true
+  certbot-etc:
+    external: true
+
+    

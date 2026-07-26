@@ -24,9 +24,9 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 ## Overview
 
-VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application, backed by managed Postgres and objcet storage rather than local files.
+VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application — running in production on AWS EC2 behind Nginx, backed by managed PostgreSQL (Neon) and Cloudflare R2 objcet storage rather than local files.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a database migration to managed Postgres, a move from local disk to S3-compatible object storage, a 149-case pytest suite, and GitHub Actions CI/CD, and Docker containerization.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a database migration to managed PostgreSQL, a move from local disk to S3-compatible object storage, a 149-case pytest suite, and GitHub Actions CI/CD, and Docker containerization.
 
 ---
 
@@ -34,8 +34,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 
 - **PDF ingestion pipeline** — upload multiple PDFs, automatically chunked and embedded into a persistent vector store with per-user isolation
 - **Document lifecycle tracking** — every uploaded document has an explicit `processing` / `ready` / `failed` status; a document is only visible or queryable once every step (Postgres row, Chroma vectors, object storage) has actually succeeded, and any partial failure is compensated (Chroma vectors and storage objects are cleaned up automatically) rather than left as an orphaned, half-uploaded record
-- **Cloud object dtorage for uploads** — PDFs are stored in Cloudflare R2 (S3-compatible) in production, with automatic fallback to local disk when R2 credentials aren't configured — same code path either way via a small storage abstraction
-- **Managed Postgres via Neon** — SQLAlchemy + Alembic (Flask-Migrate) schema migrations, automatic fallback to local SQLite when `DATABASE_URL` is unset (local dev needs zero setup)
+- **Cloud-native persistence** — PostgreSQL (Neon) for relational data via Alembic-managed migrations, and Cloudflare R2 (S3-compatible) for uploaded files, replacing the original SQLite/local-disk setup so data survives redeploys and container restarts
 - **Document management endpoints** — list your documents and delete one (Postgres row + Chroma vectors + storage object, deleted together, safely retryable if any single step fails)
 - **Intelligent query routing** — detects query intent and applies the optimal retrieval strategy for each type:
   - `summarize` → direct chunk fetch for document overview
@@ -58,68 +57,84 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 
 ## Tech Stack
 
-| Layer                | Technology                                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Backend**          | Flask, Flask-JWT-Extended, Flask-Limiter, Flask-SQLAlchemy , Flask-Migrate                             |
-| **RAG Pipeline**     | LangChain, ChromaDB, `all-MiniLM-L6-v2` embeddings (HuggingFace)                                       |
-| **LLM — local dev**  | Ollama (`qwen2.5:3b`)                                                                                  |
-| **LLM — production** | OpenRouter free tier with 4-model fallback chain                                                       |
-| **Frontend**         | Streamlit                                                                                              |
-| **Database**         | PostgreSQL via [Neon](https://neon.tech) (prod), SQLite fallback (dev)                                 |
-| **Migrations**       | Alembic via Flask-Migrate                                                                              |
-| **File storage**     | Cloudflare R2 (S3-compatible, via `boto3`) (prod), local disk fallback (dev)                           |
-| **Vector store**     | ChromaDB — local disk (by design; small enough not to need a managed service at this scale)            |
-| **Auth**             | JWT (Flask-JWT-Extended)                                                                               |
-| **Logging**          | Structured JSON to stdout/stderr (Docker-native); optional rotating files for local single-process dev |
-| **Testing**          | pytest, pytest-mock                                                                                    |
-| **CI/CD**            | GitHub Actions                                                                                         |
-| **Containerization** | Docker, Docker Compose                                                                                 |
+| Layer                    | Technology                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| **Backend**              | Flask, Flask-JWT-Extended, Flask-Limiter, Flask-SQLAlchemy , Flask-Migrate                             |
+| **RAG Pipeline**         | LangChain, ChromaDB, `all-MiniLM-L6-v2` embeddings (HuggingFace)                                       |
+| **LLM — local dev**      | Ollama (`qwen2.5:3b`)                                                                                  |
+| **LLM — production**     | OpenRouter free tier with 4-model fallback chain                                                       |
+| **Frontend**             | Streamlit                                                                                              |
+| **Database**             | PostgreSQL via [Neon](https://neon.tech) (prod), SQLite fallback (dev)                                 |
+| **Migrations**           | Alembic via Flask-Migrate                                                                              |
+| **File storage**         | Cloudflare R2 (S3-compatible, via `boto3`) (prod), local disk fallback (dev)                           |
+| **Vector store**         | ChromaDB — persisted on a dedicated AWS EBS volume in production                                       |
+| **Auth**                 | JWT (Flask-JWT-Extended)                                                                               |
+| **Logging**              | Structured JSON to stdout/stderr (Docker-native); optional rotating files for local single-process dev |
+| **Testing**              | pytest, pytest-mock                                                                                    |
+| **CI/CD**                | GitHub Actions                                                                                         |
+| **Containerization**     | Docker, Docker Compose                                                                                 |
+| **Compute (production)** | AWS EC2 (`t4g.small`, ARM/Graviton, Ubuntu 24.04 LTS)                                                  |
+| **Reverse proxy / TLS**  | Nginx + Let's Encrypt (Certbot)                                                                        |
+| **Container registry**   | GitHub Container Registry (GHCR)                                                                       |
+| **Host hardening**       | AWS Security Groups, UFW, Fail2Ban, key-only SSH (password auth disabled)                              |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        User Browser                         │
+                        Internet
+                           │
+                           ▼
+                      GoDaddy DNS
+                     (vault-iq.in)
+                           │
+                           ▼
+                      Elastic IP
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│          Nginx — TLS termination (Let's Encrypt)            │
+│         AWS EC2 (t4g.small, Ubuntu 24.04 LTS ARM)           │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP
+                           │
 ┌──────────────────────────▼──────────────────────────────────┐
 │                   Streamlit Frontend                        │
 │   Login / Register / Upload / Chat / Session History        │
 └──────────────────────────┬──────────────────────────────────┘
                            │ REST API (JWT)
-┌──────────────────────────▼───────────────────────────────────────────┐
-│                    Flask Backend (gunicorn)                          │
-│                                                                      │
-│  ┌─────────────┐  ┌───────────────────────┐  ┌────────────────────┐  │
-│  │ Auth Routes │  │     Upload Routes     │  │   Chat Routes      │  │
-│  │ /register   │  │ /upload               │  │ /ask  /chat/*      │  │
-│  │ /login      │  │ /documents(GET?DELETE)│  │ /chat/session      │  │
-│  └─────────────┘  └──────┬────────────────┘  └────────┬───────────┘  │
-│                          │                   │                       │
-│                   ┌──────▼───────────────────▼───────────┐           │
-│                   │          RAG Service                 │           │
-│                   │                                      │           │
-│                   │  1. _detect_query_type()             │           │
-│                   │  2. _extract_source_filter()         │           │
-│                   │  3. Tiny-doc shortcut / similarity   │           │
-│                   │  4. Adaptive relevance threshold     │           │
-│                   │  5. Context + prompt building        │           │
-│                   │  6. LLM call with fallback chain     │           │
-│                   └──────┬───────────────────────────────┘           │
-│                          │                                           │
-│            ┌─────────────┼───────────────┬─────────────┐             │
-│            │             │               │             │             │
-│     ┌──────▼─────┐  ┌────▼───────┐  ┌────▼──────┐ ┌────▼──────┐      │
-│     │  PostgreSQL│  │ ChromaDB   │  │ Cloudflare│ │ Ollama    │      │
-│     │  (Neon) —  │  │ (vectors)  │  │    R2     │ │   or      │      │
-│     │  (auth,    │  │            │  │ (uploaded │ │ OpenRouter│      │
-│     │ sessions,  │  │            │  │   PDFs)   │ │   (LLM)   │      │
-│     │ documents) │  │            │  │           │ │           │      │
-│     └────────────┘  └────────────┘  └───────────┘ └───────────┘      │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────▼────────────────────────────────────────────┐
+│                    Flask Backend (gunicorn)                           │
+│                                                                       │
+│  ┌─────────────┐  ┌────────────────────────┐  ┌────────────────────┐  │
+│  │ Auth Routes │  │     Upload Routes      │  │   Chat Routes      │  │
+│  │ /register   │  │ /upload                │  │ /ask  /chat/*      │  │
+│  │ /login      │  │ /documents (GET/DELETE)│  │ /chat/session      │  │
+│  └─────────────┘  └──────┬─────────────────┘  └─────┬──────────────┘  │
+│                          │                          │                 │
+│                   ┌──────▼──────────────────────────▼────┐            │
+│                   │          RAG Service                 │            │
+│                   │                                      │            │
+│                   │  1. _detect_query_type()             │            │
+│                   │  2. _extract_source_filter()         │            │
+│                   │  3. Tiny-doc shortcut / similarity   │            │
+│                   │  4. Adaptive relevance threshold     │            │
+│                   │  5. Context + prompt building        │            │
+│                   │  6. LLM call with fallback chain     │            │
+│                   └──────┬───────────────────────────────┘            │
+│                          │                                            │
+│            ┌─────────────┼───────────────┬─────────────┐              │
+│            │             │               │             │              │
+│     ┌──────▼─────┐  ┌────▼───────┐  ┌────▼──────┐ ┌────▼──────┐       │
+│     │  PostgreSQL│  │ ChromaDB   │  │ Cloudflare│ │ Ollama    │       │
+│     │  (Neon) —  │  │ (EBS-backed│  │    R2     │ │   or      │       │
+│     │  (auth,    │  │  volume on │  │ (uploaded │ │ OpenRouter│       │
+│     │ sessions,  │  │  EC2)      │  │   PDFs)   │ │   (LLM)   │       │
+│     │ documents) │  │            │  │           │ │           │       │
+│     └────────────┘  └────────────┘  └───────────┘ └───────────┘       │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+Everything from Nginx down to the Flask/Streamlit containers runs on a single AWS EC2 instance via Docker Compose. ChromaDB's data lives on a separate EBS volume — not the instance's root disk — so it survives the instance itself being replaced. PostgreSQL (Neon), Cloudflare R2, and the LLM provider (OpenRouter) are managed services outside AWS entirely; the EC2 instance is only the compute box that talks to them. Locally, `DATABASE_URL` and the R2 credentials can both be left unset — the app falls back to local SQLite and local disk automatically, so development needs no external accounts.
 
 ---
 
@@ -133,14 +148,19 @@ vaultiq/
 ├── README.md
 ├── requirements.txt                # Root-level deps
 ├── requirements-dev.txt            # Dev/test deps
-├── docker-compose.dev.yml          # Dev — self-contained (Ollama, debug mode,no restart on crash)
-├── docker-compose.prod.yml         # Prod — self-contained (OpenRouter, restart always)
+├── docker-compose.dev.yml          # Dev — self-contained (Ollama, debug mode, no restart on crash)
+├── docker-compose.prod.yml         # Prod — self-contained (OpenRouter, Neon, R2, memory-limited, restart always)
+├── docker-compose.bootstrap.yml    # One-time TLS bootstrap — minimal HTTP-only Nginx + Certbot, no app dependency
 ├── .env.dev.example                # Dev env template (copy to .env.dev, fill in secrets)
 ├── .env.prod.example               # Prod env template (copy to .env.prod, fill in secrets)
 │
+├── nginx/
+│   ├── prod.conf                   # Full HTTPS vhost — apex/www split, TLS, security headers, Streamlit + /health proxy
+│   └── bootstrap.conf              # HTTP-only vhost used once, to obtain the first Let's Encrypt certificate
+│
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                  # GitHub Actions pipeline
+│       └── deploy.yml                  # GitHub Actions pipeline — lint, test, build+push to GHCR, deploy to EC2
 │
 ├── backend/
 │   ├── app.py                      # Flask app factory, blueprint registration, migrate wiring
@@ -152,7 +172,7 @@ vaultiq/
 │   ├── .dockerignore
 │   ├── requirements.txt            # Backend-only deps — version-pinned for reproducible ARM64 builds
 │   ├── pytest.ini                  # Test config, markers, warning filters
-│   ├── wsgi.py                     # Entrypoint for Gunicorn — eager model warmup only. Does NOT run migrations (flask db upgrade is an explicit deploy-pipeline step — running it here would risk a migration race on every worker/master restart)
+│   ├── wsgi.py                     # Entrypoint for Gunicorn (Docker prod only) + eager model warmup.
 │   │
 │   ├── extensions/                 # Flask extensions
 │   │   ├── db.py                   # SQLAlchemy
@@ -189,10 +209,10 @@ vaultiq/
 │   │   │   └── sample.pdf          # 3-page test PDF
 │   │   ├── test_unit_config.py     # Tier 1 — config validation
 │   │   ├── test_unit_rag.py        # Tier 1 — query router, retry, fallback, threshold, K
-│   │   ├── test_unit_storage.py            # Tier 1 — object key construction, local + mocked R2 backends
-│   │   ├── test_unit_logging.py            # Tier 1 — JSON formatter, request-context filter correctness
-│   │   ├── test_integration_rag.py # Tier 2 — real Chroma + fixture PDF, mocked LLM
-│   │   ├── test_integration_logging_gunicorn.py  # Tier 2 — real Gunicorn subprocess, preload + fork
+│   │   ├── test_unit_storage.py    # Tier 1 — object key construction, local + mocked R2 backends
+│   │   ├── test_unit_logging.py    # Tier 1 — JSON formatter, request-context filter correctness
+│   │   ├── test_integration_rag.py     # Tier 2 — real Chroma + fixture PDF, mocked LLM
+│   │   ├── test_integration_logging_gunicorn.py    # Tier 2 — real Gunicorn subprocess, preload + fork
 │   │   └── test_routes.py          # Tier 3 — Flask test client, auth, upload lifecycle, validation
 │   │
 │   └── storage/                    # Runtime data — gitignored except .gitkeep files
@@ -325,7 +345,7 @@ A failure at any ingestion step (embedding, storage upload, or the final DB comm
 | `GET`    | `/chat/<id>`      | JWT  | Get full message history for session                                                            |
 | `POST`   | `/ask`            | JWT  | Ask a question — triggers RAG pipeline                                                          |
 | `GET`    | `/health`         | No   | Liveness check (Flask + DB)                                                                     |
-| `GET`    | `/health/deep`    | No   | Dependency check (Chroma, SQLite, LLM config, log files sizes)                                  |
+| `GET`    | `/health/deep`    | No   | Dependency check (Chroma, DB, LLM config, log files sizes)                                      |
 
 **Rate limiting:** `/ask` is limited to `10 per minute` per authenticated user (JWT-keyed, not IP-keyed — configurable via `ASK_RATE_LIMIT` env var) to protect OpenRouter free-tier quota.
 
@@ -350,7 +370,7 @@ cd vaultiq
 
 ```bash
 python -m venv venv
-venv\Scripts\activate        # Mac: source venv\Scripts\activate
+source venv/bin/activate        # Windows: venv\Scripts\activate
 ```
 
 ### 3. Install dependencies
@@ -508,7 +528,7 @@ VaultIQ has a 3-tier test suite: **149 test cases collected across 8 files** (14
 ```
 collected 149 items / 2 deselected / 147 selected
 ...
-147 passed, 2 deselected in 69.04s
+147 passed, 2 deselected in 68.90s
 ```
 
 The raw number of `def test_...` functions in the source is lower (123) — the difference is `@pytest.mark.parametrize`, which collects one test _item_ per parameter row from a single function definition (e.g. one `def test_detect_query_type` generates 24 separate collected cases, one per query-type example).
@@ -517,7 +537,7 @@ The raw number of `def test_...` functions in the source is lower (123) — the 
 
 ```bash
 cd backend
-pytest tests/test_unit_config.py tests/test_unit_rag.py tests/test_unit_storage.py tests/test_unit_logging -v
+pytest tests/test_unit_config.py tests/test_unit_rag.py tests/test_unit_storage.py tests/test_unit_logging.py -v
 ```
 
 Covers: config validation, query type detection, retry logic, fallback chain, adaptive threshold, dynamic K, source filter helper, provider factory, and retrieval-layer error handling, object-key construction and local/R2 storage-backends (R2 mocked, no network), and the JSON logging formatter + request-context filter (including the regression test proving `request_id`/`user_id` are correctly attached from _any_ module logger, not just root).
@@ -579,6 +599,10 @@ pytest tests/ -v
 - **Rotating log files** — bounded at ~150MB total, logs never contain passwords or JWT tokens
 - **Global exception handler never leaks internals** — any handled exception, anywhere in the app, returns a generic JSON message to the client; the real exception (with full traceback) is captured only in server-side structured logs, tagged with `request_id`/`user_id` for correlation
 - **Consistent JSON error contract** — every response, including 404/405/413/500 and any unexpected failure, is JSON. The client never receives Flask's default HTML error pages or a raw stack trace
+- **TLS everywhere in production** — Nginx terminates HTTPS with an auto-renewing Let's Encrypt certificate; HTTP requests are redirected to HTTPS
+- **Least-privilege AWS access** — a scoped IAM user (not the AWS root account) provisions and manages resources
+- **Key-only SSH** — password authentication is disabled at the OS level on the EC2 instance; the private key is the only way in
+- **Defense-in-depth network hardening** — AWS Security Groups restrict inbound traffic at the cloud-provider level (only 22/80/443), with UFW as a second host-level firewall layer and Fail2Ban actively banning IPs after repeated failed SSH attempts
 
 ---
 
@@ -595,6 +619,7 @@ pytest tests/ -v
 - **HuggingFace model pre-baked into Docker image** — prevents 30-60 second cold-start delay on first request after deploy
 - **Eager model warm-up via `wsgi.py` + gunicorn `preload_app`** — embedding model and LLM client load once in the master process before forking. workers share them via copy-on-write instead of each loading a separate copy. `post_fork` disposes and recreates the SQLAlchemy engine per worker so each gets its own DB connections instead of sharing an inherited, unsafe one
 - **Object storage uploads stages locally firsts** — PDFs are validated and ingested from a local temp file before ever being pushed to R2, so a malformed.unparsable PDF never generates unnecessary network traffic
+- **Images pre-built for ARM64** — CI builds and pushes `linux/arm64` images to GHCR so the EC2 (Graviton) host pulls a native image instead of building or emulating on every deploy
 
 ---
 
@@ -606,9 +631,8 @@ VaultIQ went through a dedicated production-stabilization pass covering structur
 
 - **Every log line is a single JSON object** — `timestamp`, `level`, `logger`, `message`, `request_id`, `user_id`, `module`, `filename`, `line`, plus any caller-supplied structured fields (e.g. `processing_time_ms`, `pdf_filename`, `chunks`) — not free-text, so logs are directly queryable (`jq`, log aggregation tools) instead of needing regex parsing
 - **stdout/stderr are the authoritative destination under Docker/Gunicorn** — `RotatingFileHandler` is not safe to share across multiple forked Gunicorn worker processes writing to the same file concurrently (rotation itself isn't process-safe). Docker's own log driver already captures stdout/stderr durably per-container with no such hazard, so file logging is now opt-in only (`ENABLE_FILE_LOGGING=true`), intended for local single-process dev debugging
-
 - **`request_id` and `user_id` are correctly attached from any module** not just root — the request-context filter is attached at the _handler_ level rather than the root logger, because a filter on the root logger silently never runs for records from a child logger (e.g. any ordinary `logging.getLogger(__name__)` call) even though they reach root's handlers via propagation. This was found and fixed with a dedicated regression test
-- **One structured completion line per request** — a dedicated `http.access` logger records `endpoint`, `method`, `status`, `processing_time_ms`, and `remote_addr` for every request;Gunicorn's own built-in access log is disabled (`access.log = None`) Specifically to avoid a second, differently-formatted line duplicating the same request
+- **One structured completion line per request** — a dedicated `http.access` logger records `endpoint`, `method`, `status`, `processing_time_ms`, and `remote_addr` for every request;Gunicorn's own built-in access log is disabled (`accesslog = None`) Specifically to avoid a second, differently-formatted line duplicating the same request
 
 ### Production warning suppression
 
@@ -628,8 +652,10 @@ VaultIQ went through a dedicated production-stabilization pass covering structur
 
 - **Local Ollama generation time on long-form answers (dev environment only)** `qwen2.5:3b` running on CPU via Ollama generates output proportionally to requested length, not just input/context size. Query types that explicitly ask for long, multi-part output — `interview` (6 full Q&A pairs), or a `factual`/`summarize` question phrased as "explain each type in detailed with examples" — can exceed even a generous gunicorn worker timeout (300s in dev) on typical development hardware. Shorter or more direct questions complete comfortably within 1-3 minutes.
   - This is a **dev-only** limitation. Production uses OpenRouter's hosted inference (`google/gemma-4-31b-it:free` and its fallback chain), which is dramatically faster than local CPU-bound Ollama and does not exhibit this behaviour.
+  - No code changes are needed to work around this for local testing — prefer more direct/scoped questions when testing against Ollama, or expect longer waits on deliberately verbose prompts.
 - **ChromaDB stays on local disk** — a deliberate choice at current scale rather than an oversight; Postgres and file storage were the two layers that actually needed to survive redeploys and container recreation. Revisit only if vector data volume outgrows what a single VPS disk can hold.
 - **No stale-document reconciliation job yet** — a hard process crash (OOM kill, `SIGKILL`) between ingestion steps can leave a document stuck in `status="processing"`. The explicit status column makes a cleanup job for this straightforward to add; it doesn't exist yet.
+- **Production runs on a 2GB RAM instance (`t4g.small`, AWS free tier)** — shared across Nginx, Streamlit, and Flask/Gunicorn (with the embedding model loaded in memory). Backend/frontend container memory limits (768MB/384MB) and Gunicorn's `preload_app` + batched ingestion embedding are deliberate choices to fit this budget, not defaults; a memory-heavier workload (many concurrent large-PDF ingestions, for instance) would need a bigger instance rather than further tuning.
 
 ---
 
@@ -646,7 +672,7 @@ push / PR
 1. Lint (ruff)          ~10s   — syntax errors, unused imports, undefined names
     │ passes
     ▼
-2. Test (pytest)        ~30s   — Tier 1 + Tier 3, mocked LLM, no API keys needed
+2. Test (pytest)        ~30s   — Tier 1 + Tier 3, mocked LLM, no API keys/DB/R2 needed
     │ passes
     │
     ├── PR / feature branch -> STOP (no deploy)
@@ -654,12 +680,53 @@ push / PR
     └── push to main only
             │
             ▼
-        3. Deploy (Render hook)
-           Fires RENDER_DEPLOY_HOOK_URL secret
-           Render pulls latest main and redeployes
+        3. Build ARM64 images (backend + frontend), push to GHCR
+           tagged by commit SHA
+            │
+            ▼
+        4. Deploy to AWS EC2 (manual approval gate)
+           SSH in, pull new images, run `flask db upgrade`,
+           bring the stack up, health-check the live domain
 ```
 
-Render's built-in GitHub integration is intentionally **disabled** — the deploy hook in CI ensures Render only receives a deploy signal after lint and tests both pass.
+CI currently covers lint + test only. `docker-compose.prod.yml` already pulls pre-built, tagged images from GHCR (see below) — but nothing in this repo yet builds and pushes those images automatically, and there's no automated deploy-to-EC2 step. Until that's wired up (tracked in [Project Status](#project-status)), a deploy is a manual `docker build` + tag + push to GHCR, followed by `docker compose pull` + `up` on the server.
+
+### Production Deployment (AWS)
+
+Production runs on a single AWS EC2 instance (`t4g.small`, ARM/Graviton, Ubuntu 24.04 LTS) via Docker Compose, behind Nginx with an auto-renewing Let's Encrypt TLS certificate. ChromaDB's data lives on a dedicated EBS volume — not the instance's root disk — so it survives the instance itself being replaced. PostgreSQL (Neon), file storage (R2), and the LLM provider (OpenRouter) are managed services outside AWS; the EC2 instance is only the compute box that talks to them.
+
+**Domain:** [https://vault-iq.in](https://vault-iq.in), registered via GoDaddy, pointed at the instance's Elastic IP. `www.vault-iq.in` redirects to the canonical apex domain.
+
+**Deployment flow:** every push to `main` that passes lint + tests triggers a build of ARM64 Docker images, pushed to GitHub Container Registry (GHCR) tagged by commit SHA. A manually-approved deploy job then SSHes into the EC2 instance, pulls the new images, runs the Alembic migration (`flask db upgrade`, explicitly pointed at `app.py` via `FLASK_APP` — not `wsgi.py`, which additionally runs embedding-model and LLM warmup at import time and would turn a schema-only migration into a slower, more failure-prone step), and restarts the stack — followed by an automated health check against the live domain.
+
+### TLS Bootstrap (one-time, before the first deploy)
+
+Certbot's HTTP-01 challenge needs a webserver answering on port 80 _before_ any certificate exists — but `nginx/prod.conf` requires a certificate to even start. `docker-compose.bootstrap.yml` breaks that circular dependency:
+
+```
+docker-compose.bootstrap.yml
+    │
+    ▼
+Minimal HTTP-only Nginx (nginx/bootstrap.conf)
+    — no dependency on backend/frontend, serves only
+      /.well-known/acme-challenge/
+    │
+    ▼
+Certbot — obtains the first certificate for
+    vault-iq.in and www.vault-iq.in
+    │
+    ▼
+Bootstrap stack torn down
+    │
+    ▼
+docker-compose.prod.yml brought up — nginx/prod.conf
+    now finds a real certificate at
+    /etc/letsencrypt/live/vault-iq.in/
+```
+
+Both the bootstrap and production Nginx share the same `certbot-etc` and `certbot-webroot` Docker volumes, so the certificate obtained during bootstrap is exactly what production TLS serves. Renewal (a separate periodic Certbot run, not part of this bootstrap flow) reloads Nginx via a `--deploy-hook` rather than relying on the certificate files changing on disk alone.
+
+**Containers on the EC2 instance:** `nginx` (TLS termination, reverse proxy, security headers, upload size limit, `/health` passthrough), `frontend` (Streamlit), and `backend` (Flask/Gunicorn). There is no separate Chroma container — it's an embedded library writing to the EBS-mounted volume.
 
 ### Running with Docker (dev and prod environments)
 
@@ -711,20 +778,20 @@ docker compose -f docker-compose.prod.yml down
 
 **Key differences per environment:**
 
-| Setting         | Dev                                          | Prod                                   |
-| --------------- | -------------------------------------------- | -------------------------------------- |
-| LLM             | Ollama `qwen2.5:3b`                          | OpenRouter `gemma-4-31b-it:free`       |
-| Database        | Local SQLite                                 | Neon PostgreSQL                        |
-| File storage    | Local disk                                   | Cloudflare R2                          |
-| Ollama service  | ✅ Included                                  | ❌ Not needed (API call)               |
-| LOG_LEVEL       | DEBUG                                        | INFO                                   |
-| LLM timeout     | 120s (local CPU inference is slow)           | 30s (API calls are fast)               |
-| Retries         | 1                                            | 2                                      |
-| Rate limit      | 100/min (no quota to protect)                | 10/min (protects OpenRouter free tier) |
-| Restart policy  | `no` (stay stopped on crash to inspect logs) | `unless-stopped` (auto-recover)        |
-| Memory limit    | None                                         | 450MB (fits Render free tier 512MB)    |
-| Volume name     | `vaultiq_backend_storage_dev`                | `vaultiq_backend_storage_prod`         |
-| Container names | `vaultiq_backend_dev`                        | `vaultiq_backend_prod`                 |
+| Setting         | Dev                                          | Prod                                                                                                                             |
+| --------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| LLM             | Ollama `qwen2.5:3b`                          | OpenRouter `gemma-4-31b-it:free`                                                                                                 |
+| Database        | Local SQLite                                 | Neon PostgreSQL                                                                                                                  |
+| File storage    | Local disk                                   | Cloudflare R2                                                                                                                    |
+| Ollama service  | ✅ Included                                  | ❌ Not needed (API call)                                                                                                         |
+| LOG_LEVEL       | DEBUG                                        | INFO                                                                                                                             |
+| LLM timeout     | 120s (local CPU inference is slow)           | 30s (API calls are fast)                                                                                                         |
+| Retries         | 1                                            | 2                                                                                                                                |
+| Rate limit      | 100/min (no quota to protect)                | 10/min (protects OpenRouter free tier)                                                                                           |
+| Restart policy  | `no` (stay stopped on crash to inspect logs) | `unless-stopped` (auto-recover)                                                                                                  |
+| Memory limit    | None                                         | Backend 768MB / frontend 384MB (sized for the EC2 `t4g.small` instance's 2GB total, leaving headroom for Nginx/OS/Docker daemon) |
+| Volume name     | `vaultiq_backend_storage_dev`                | `vaultiq_backend_storage_prod`                                                                                                   |
+| Container names | `vaultiq_backend_dev`                        | `vaultiq_backend_prod`                                                                                                           |
 
 Dev uses a named Docker volume so local ChromaDB/fallback data persists across container recreation on a laptop. Prod uses an EBS bind mount instead — a named Docker volume would only survive _container_ recreation, but an EBS volume survives the whole _EC2 instance_ being replaced, which is the actual failure mode this needs to protect against.
 
@@ -736,22 +803,29 @@ Dev uses a named Docker volume so local ChromaDB/fallback data persists across c
 | --------------------------------------------------------- | ----------- |
 | Backend (Flask API + RAG pipeline)                        | ✅ Complete |
 | Frontend (Streamlit)                                      | ✅ Complete |
-| Test suite (112 tests, 3 tiers)                           | ✅ Complete |
+| Test suite (149 tests, 3 tiers)                           | ✅ Complete |
 | CI/CD (GitHub Actions)                                    | ✅ Complete |
 | Docker (backend + frontend + compose)                     | ✅ Complete |
 | Database migration (SQLite → Neon Postgres)               | ✅ Complete |
 | File storage migration (local disk → Cloudflare R2)       | ✅ Complete |
 | Document lifecycle + deletion endpoints                   | ✅ Complete |
 | Structured stdout/stderr logging                          | ✅ Complete |
+| `docker-compose.prod.yml`: pulls by tag from GHCR         | ✅ Complete |
 | AWS deployment guide (EC2/EBS/Nginx/TLS/monitoring)       | 🔜 Planned  |
 | Nginx (TLS-only) + Certbot bootstrap in repo              | 🔜 Planned  |
 | CI/CD: lint → test → ARM64 build → push GHCR → deploy EC2 | 🔜 Planned  |
-| `docker-compose.prod.yml`: pulls by tag from GHCR         | 🔜 Planned  |
 | Stale-document reconciliation job                         | 🔜 Planned  |
 
 ---
 
 ## Future Improvements
+
+### Near-term (backend already supports these — UI/pipeline work remaining)
+
+- **Document management page** — a dedicated UI page listing all uploaded documents with a delete action per document. The backend already exposes both endpoints (`GET /documents`, `DELETE /documents/<id>`, see [API Endpoints](#api-endpoints)); this is purely a Streamlit page + sidebar link, no new backend work needed
+- **Multi-format document ingestion** — extend the upload pipeline beyond PDF to accept Word documents (`.docx`), plain text (`.txt`), and Markdown (`.md`). Requires format-specific loaders feeding into the same chunking/embedding pipeline (`PyPDFLoader` swapped for `Docx2txtLoader`/`TextLoader`/`UnstructuredMarkdownLoader` depending on file type), plus extending the upload route's magic-byte/extension validation to the new formats
+
+### Other Improvements
 
 - **Stale-document reconciliation job** — a background task to find and clean up documents stuck in `status="processing"` after a hard crash (OOM kill, `SIGKILL`) between ingestion steps
 - **Docker log retention** — explicit `max-size`/`max-file` rotation on the Docker log driver itself, plus optional shipping to an external log aggregator (e.g. Grafana Loki, Better Stack) for logs that need to survive a container being recreated
@@ -761,6 +835,7 @@ Dev uses a named Docker volume so local ChromaDB/fallback data persists across c
 - **Conversation-aware retrieval** — include recent chat history in the retrieval query for multi-turn follow-up questions
 - **Document collections** — let users organise documents into named collections and query within a collection
 - **Export** — download chat history as PDF or Markdown
+- **Automated cert renewal monitoring** — alerting if Let's Encrypt auto-renewal ever fails, rather than discovering it when the cert expires
 
 ## Acknowledgements
 
