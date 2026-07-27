@@ -15,6 +15,7 @@ Phase 7: Eager model warm-up via wsgi.py + gunicorn preload_app — duplicate
 """
 
 import os 
+import gc
 import logging
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -235,13 +236,18 @@ def _extract_source_filter(question, vectordb, user_id):
 
 
 # ChromaDB Helper
+_vectordb = None
+# avoids repeatedly constructing clients.
 def _get_vectordb():
     """Returns a Chroma client pointed at the persistent store."""
-    from langchain_chroma import Chroma as _Chroma
-    return _Chroma(
-        persist_directory=CHROMA_DB_PATH,
-        embedding_function=_get_embedding_model()
-    )
+    global _vectordb
+    if _vectordb is None:
+        from langchain_chroma import Chroma as _Chroma
+        _vectordb = _Chroma(
+            persist_directory=CHROMA_DB_PATH,
+            embedding_function=_get_embedding_model()
+        )
+    return _vectordb
     
     
 def ingest_pdf(pdf_path, user_id, document_id, filename=None):
@@ -316,6 +322,16 @@ def ingest_pdf(pdf_path, user_id, document_id, filename=None):
         logger.debug(f"Ingested batch {start}-{end} of {total} chunks for '{filename}'.")
         
     logger.info(f"Added {len(chunks)} chunks to ChromaDB for '{filename}'.")
+    
+    # Explicitly release large temporary ingestion objects once indexing is complete. 
+    # This allows Python to reclaim the raw PDF pages, split chunks, and generated IDs 
+    # immediately instead of waiting for a future garbage collection cycle. 
+    # Note that this frees Python objects only; the process RSS reported by Docker may 
+    # not decrease because the underlying memory allocator 
+    # (glibc/PyTorch) can retain freed pages for reuse.
+    del documents, chunks, ids
+    gc.collect()
+    
     return total
 
 def delete_document_vectors(document_id, user_id):

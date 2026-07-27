@@ -31,7 +31,8 @@ services:
     restart: unless-stopped
     # t4g.medium has 4GB total, shared with frontend + nginx + OS/Docker overhead.
     # 2 gunicorn workers + embedding model (~180MB each) + OS overhead.
-    mem_limit: 768m
+    mem_reservation: 800m
+    mem_limit: 1400m
     expose:
       - "5000"
     env_file:
