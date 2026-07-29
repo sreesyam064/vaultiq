@@ -167,7 +167,11 @@ jobs:
             # Authenticate to GHCR before pulling — GHCR_PAT is docuemnted as needed
             # but was never actually used; without this, `pull` below fails on any private package.
 
-            echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io \
+              -u sreesyam064 \  
+              --password-stdin
+
+              # github.acttor -> sreesyam064 to avoid issues if someone else trioggers the workflow.
 
             cd /opt/vaultiq/app
             export IMAGE_TAG=sha-${{ github.sha }}

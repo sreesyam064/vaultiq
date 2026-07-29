@@ -12,9 +12,9 @@
 #   compose file) — nginx below expects one and won't start cleanly without it.
 
 # USAGE (this is what .github/workflows/deploy.yml runs on the VPS, commands below are for manual/local use):
-#   Pull      : docker compose -f docker-compose.prod.yml --env-file .env.prod pull
-#   Migrate   : docker compose -f docker-compose.prod.yml --env-file .env.prod run --rm backend flask db upgrade
-#   Start     : docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#   Pull      : docker compose -f docker-compose.prod.yml --env-file ../.env.prod pull
+#   Migrate   : docker compose -f docker-compose.prod.yml --env-file ../.env.prod run --rm backend flask db upgrade
+#   Start     : docker compose -f docker-compose.prod.yml --env-file ../.env.prod up -d
 #   Stop      : docker compose -f docker-compose.prod.yml down
 #   Reset     : docker compose -f docker-compose.prod.yml down -v   (wipes named volumes — NOT certbot-etc/webroot, those are external)
 #   Logs      : docker compose -f docker-compose.prod.yml logs -f
@@ -52,6 +52,11 @@ services:
       start_period: 90s # matches the Dockerfile's own start_period — model warmup on boot
     networks:
       - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   frontend:
     image: ghcr.io/sreesyam064/vaultiq-frontend:${IMAGE_TAG:-latest}
@@ -76,10 +81,16 @@ services:
       start_period: 30s
     networks:
       - internal
-  
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    mem_limit: 128m
     ports:
       - "80:80"
       - "443:443"
@@ -96,7 +107,12 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      - internal 
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5" 
 
 networks:
   internal:
