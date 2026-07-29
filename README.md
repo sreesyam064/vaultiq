@@ -1,4 +1,5 @@
 <div align="center">
+
 # 🧠 VaultIQ
 
 ### Personal Knowledge Base Assistant
