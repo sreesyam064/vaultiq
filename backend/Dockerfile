@@ -27,7 +27,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pip install is skipped entirely an rebuilds. Fast rebuilds matter 
 # when iterating locally and in CI
 COPY requirements.txt .
+
+# Install CPU build first, then install remaining packages.
+# CPU wheel is selected from official PyTorch CPU index.
 RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch \
     && pip install --no-cache-dir -r requirements.txt
 
 # HuggingFace embedding model pre-download
