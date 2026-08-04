@@ -190,7 +190,11 @@ def chroma_dir(tmp_path, monkeypatch):
     import services.rag_service as rag
     monkeypatch.setattr(rag, "CHROMA_DB_PATH", chroma_path)
     
-    return chroma_path
+    rag._vectordb = None
+    yield chroma_path 
+    rag._vectordb = None 
+    
+    # return chroma_path
 
 
 @pytest.fixture(scope="session")

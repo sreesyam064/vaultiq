@@ -1,0 +1,16 @@
+[run]
+branch = True
+omit = 
+    evaluation/*
+    wsgi.py
+    tests/*
+
+[report]
+# Line ordering doesn't matter to coverage.py, but keeping missing 
+# numbers in terminal report (--cov-report-term-missing) so gaps are 
+# visible without opening the HTML report every time.
+skip_empty = True
+precision = 1
+
+[html]
+directory = htmlcov

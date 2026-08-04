@@ -14,6 +14,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-latest-orange)](https://chromadb.com)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-blue?logo=postgresql)](https://neon.tech)
 [![Streamlit](https://img.shields.io/badge/Streamlit-latest-red?logo=streamlit)](https://streamlit.io)
+![CI](https://github.com/sreesyam064/vaultiq/actions/workflows/deploy.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 [Overview](#overview) • [Features](#key-features) • [Tech Stack](#tech-stack) • [Setup](#installation--setup) • [Testing](#testing) • [Deployment](#cicd--deployment)
@@ -28,7 +29,7 @@ A production-grade RAG (Retrieval-Augmented Generation) application built with F
 
 VaultIQ is a production-grade Personal Knowledge Base Assistant that lets users upload PDF documents and ask intelligent questions about them in natural language. It combines a Flask REST API backend, a ChromaDB vector store, a LangChain RAG pipeline, and a Streamlit frontend into a fully deployable application — running in production on AWS EC2 behind Nginx, backed by managed PostgreSQL (Neon) and Cloudflare R2 objcet storage rather than local files.
 
-The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a database migration to managed PostgreSQL, a move from local disk to S3-compatible object storage, a 149-case pytest suite, and GitHub Actions CI/CD, and Docker containerization.
+The project was built as a portfolio piece demonstrating end-to-end ML system design — from PDF ingestion and embedding to intelligent query routing, multi-user isolation, JWT authentication, rate limiting, structured logging, a database migration to managed PostgreSQL, a move from local disk to S3-compatible object storage, a 147-case pytest suite, and GitHub Actions CI/CD, and Docker containerization.
 
 ---
 
@@ -53,7 +54,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 - **Production hardening** — JWT auth, rate limiting, config validation at startup, retry/timeout on all LLM calls, rotating file logging, `/health` and `/health/deep` endpoints
 - **Structured JSON logging, Docker-native** — every log line is a single JSON object with `request_id`/`user_id` correctly attached from _any_ module (not just the ones logging directly to root), streamed to stdout/stderr — the authoritative log destination under Gunicorn, with no multi-process file-rotation hazard
 - **Global error handling** — every failure mode (upload, embedding, vector DB, LLM, and anything unexpected) returns a consistnet JSON error; raw exceptions never reach the client.
-- **149-case test suite (147 run, 2 deselected)** — unit, integration, and route tests, including a real-Gunicorn-subprocess test proving logging survives `preload` + worker forking
+- **147-case test suite (147 run, 2 deselected)** — unit, integration, and route tests, including a real-Gunicorn-subprocess test proving logging survives `preload` + worker forking
 
 ---
 
@@ -72,7 +73,7 @@ The project was built as a portfolio piece demonstrating end-to-end ML system de
 | **Vector store**         | ChromaDB — persisted on a dedicated AWS EBS volume in production                                       |
 | **Auth**                 | JWT (Flask-JWT-Extended)                                                                               |
 | **Logging**              | Structured JSON to stdout/stderr (Docker-native); optional rotating files for local single-process dev |
-| **Testing**              | pytest, pytest-mock                                                                                    |
+| **Testing**              | pytest, pytest-mock, pytest-cov (branch coverage)                                                      |
 | **CI/CD**                | GitHub Actions                                                                                         |
 | **Containerization**     | Docker, Docker Compose                                                                                 |
 | **Compute (production)** | AWS EC2 (`t4g.small`, ARM/Graviton, Ubuntu 24.04 LTS)                                                  |
@@ -525,10 +526,10 @@ Delete `backend/storage` to clear local ChromaDB data and any local-disk fallbac
 
 ## Testing
 
-VaultIQ has a 3-tier test suite: **149 test cases collected across 8 files** (147 run + 2 deselected by default — see Tier 2 note below). Verified via `pytest tests/ --tb=short`:
+VaultIQ has a 3-tier test suite: **147 test cases collected across 8 files** (147 run + 2 deselected by default — see Tier 2 note below). Verified via `pytest tests/ --tb=short`:
 
 ```
-collected 149 items / 2 deselected / 147 selected
+collected 147 items / 2 deselected / 147 selected
 ...
 147 passed, 2 deselected in 68.90s
 ```
@@ -583,7 +584,25 @@ pytest tests/ -v
 | 2 — Integration | test_integration_rag.py              | 15             | HuggingFace, ChromaDB            | ❌ local only |
 | 2 — Integration | test_integration_logging_gunicorn.py | 2 (deselected) | gunicorn on PATH, full dep stack | ❌ local only |
 | 3 — Routes      | test_routes.py                       | 41             | Flask only (mocked services)     | ✅            |
-| **Total**       |                                      | **149**        |                                  |               |
+| **Total**       |                                      | **147**        |                                  |               |
+
+### Coverage
+
+Coverage is measured with `pytest-cov` (branch coverage enabled via `.coveragerc`) and enforced in CI as a single global gate — not per-module thresholds. The reasoning: this is a solo-maintained project where a strict per-file gate mostly adds friction on every commit rather than catching real regressions, so CI enforces one overall floor and full per-file numbers are still visible in the report (and the uploaded HTML artifact) to guide where to add tests manually.
+
+```bash
+cd backend
+pytest tests/ --cov --cov-config=.coveragerc --cov-report=term-missing --cov-report=html
+```
+
+| Run                               | Branch coverage | Notes                                                        |
+| --------------------------------- | --------------- | ------------------------------------------------------------ |
+| Full local suite (Tier 1 + 2 + 3) | 81.9%           | Includes integration tests against real Chroma               |
+| CI suite (Tier 1 + 3 only)        | 77.3%           | Tier 2 integration excluded from CI (see Testing note above) |
+
+CI gates on `--fail-under=75` — a few points below the measured 77.3% CI-only baseline, enough buffer to absorb minor test-order noise without masking a real regression. The HTML report is uploaded as a CI artifact on every run (pass or fail) so per-file gaps stay visible without needing a hard per-module gate.
+
+> `services/rag_service.py` is the lowest-covered file in the CI-only run (67.2%), noted under [Known Limitations](#known-limitations) as something to improve deliberately rather than an oversight.
 
 ---
 
@@ -625,6 +644,33 @@ pytest tests/ -v
 
 ---
 
+## Backend Image Optimization
+
+During production deployment, a Docker image size audit revealed that the backend image had grown to **~9.7 GB**, which was significantly larger than expected for a Flask-based RAG application.
+
+**Root cause:** The default PyTorch installation pulled in the CUDA-enabled build, even though VaultIQ is deployed on an **AWS Graviton (ARM64) CPU-only EC2 instance** with no NVIDIA GPU. Image inspection showed that most of the image size was consumed by unnecessary GPU dependencies, including:
+
+- NVIDIA CUDA libraries (~2.9 GB)
+- CUDA runtime components
+- Triton
+- GPU-enabled PyTorch build
+
+**Optimizations implemented:**
+
+- Replaced the CUDA-enabled PyTorch build with the official **CPU-only PyTorch** build
+- Removed all unnecessary GPU-related dependencies
+- Rebuilt and validated the backend image for the native **linux/arm64** platform
+
+**Results:**
+
+- **Backend image size reduced from ~9.7 GB to ~3.0 GB (≈69% reduction)**
+- Eliminated unnecessary CUDA and NVIDIA libraries
+- Faster Docker image builds in CI
+- Faster image pulls and deployments on AWS EC2
+- Lower GitHub Container Registry (GHCR) storage usage
+- Reduced disk space consumption on the production server
+- Production dependency set now matches the actual CPU-only infrastructure
+
 ## Observability & Error Handling
 
 VaultIQ went through a dedicated production-stabilization pass covering structured logging, memory optimization, warning suppression, and error handling — the four things that matter most before trusting an app to run unattended.
@@ -658,6 +704,7 @@ VaultIQ went through a dedicated production-stabilization pass covering structur
 - **ChromaDB stays on local disk** — a deliberate choice at current scale rather than an oversight; Postgres and file storage were the two layers that actually needed to survive redeploys and container recreation. Revisit only if vector data volume outgrows what a single VPS disk can hold.
 - **No stale-document reconciliation job yet** — a hard process crash (OOM kill, `SIGKILL`) between ingestion steps can leave a document stuck in `status="processing"`. The explicit status column makes a cleanup job for this straightforward to add; it doesn't exist yet.
 - **Production runs on a 2GB RAM instance (`t4g.small`, AWS free tier)** — shared across Nginx, Streamlit, and Flask/Gunicorn (with the embedding model loaded in memory). Backend/frontend container memory limits (768MB/384MB) and Gunicorn's `preload_app` + batched ingestion embedding are deliberate choices to fit this budget, not defaults; a memory-heavier workload (many concurrent large-PDF ingestions, for instance) would need a bigger instance rather than further tuning.
+- **`service/rag_service.py` CI coverage sits at 67.2%, the lowest of any core module** — the gap is concentrated in `ingest_pdf` and the full `ask_question` retrieval flow, which are exercised by `test_integration_rag.py` (real Chroma, real embeddings) but that tier is intentionally excluded from CI (see [Testing](#testing)). This isn't a case of untested logic — Tier 2 does cover it locally — it's a case of CI's own visibility into it being lower than reality. Deliberately left as-is for now rather than force-fitting Tier 2 into CI (which would slow the pipeline down for a HuggingFace model download) or writing redundant mocked-Chroma unit tests just to satisfy a number; revisit if `rag_service.py` sees churn without a corresponding Tier 2 run catching a regression.
 
 ---
 
@@ -675,6 +722,9 @@ push / PR
     │ passes
     ▼
 2. Test (pytest)        ~30s   — Tier 1 + Tier 3, mocked LLM, no API keys/DB/R2 needed
+    │                          — coverage collected across both (branch coverage, .coveragerc)
+    │                          — Gated at --fail-under=75
+    │                          — HTML coverage report uploaded as build artifact (pass/fail, 14-day retention)
     │ passes
     │
     ├── PR / feature branch -> STOP (no deploy)
@@ -803,7 +853,7 @@ Dev uses a named Docker volume so local ChromaDB/fallback data persists across c
 | --------------------------------------------------------- | ----------- |
 | Backend (Flask API + RAG pipeline)                        | ✅ Complete |
 | Frontend (Streamlit)                                      | ✅ Complete |
-| Test suite (149 tests, 3 tiers)                           | ✅ Complete |
+| Test suite (147 tests, 3 tiers)                           | ✅ Complete |
 | CI/CD (GitHub Actions)                                    | ✅ Complete |
 | Docker (backend + frontend + compose)                     | ✅ Complete |
 | Database migration (SQLite → Neon Postgres)               | ✅ Complete |
@@ -811,9 +861,13 @@ Dev uses a named Docker volume so local ChromaDB/fallback data persists across c
 | Document lifecycle + deletion endpoints                   | ✅ Complete |
 | Structured stdout/stderr logging                          | ✅ Complete |
 | `docker-compose.prod.yml`: pulls by tag from GHCR         | ✅ Complete |
-| AWS deployment guide (EC2/EBS/Nginx/TLS/monitoring)       | 🔜 Planned  |
-| Nginx (TLS-only) + Certbot bootstrap in repo              | 🔜 Planned  |
-| CI/CD: lint → test → ARM64 build → push GHCR → deploy EC2 | 🔜 Planned  |
+| AWS deployment guide (EC2/EBS/Nginx/TLS/monitoring)       | ✅ Complete |
+| Nginx (TLS-only) + Certbot bootstrap in repo              | ✅ Complete |
+| CI/CD: lint → test → ARM64 build → push GHCR → deploy EC2 | ✅ Complete |
+| Backend image optimization (69% reduction)                | ✅ Complete |
+| Live in production (vault-iq.in, HTTPS)                   | ✅ Complete |
+| Automatic rollback on failed deploy                       | 🔜 Planned  |
+| Docker image cleanup (old tags/layers)                    | 🔜 Planned  |
 | Stale-document reconciliation job                         | 🔜 Planned  |
 
 ---
@@ -824,6 +878,11 @@ Dev uses a named Docker volume so local ChromaDB/fallback data persists across c
 
 - **Document management page** — a dedicated UI page listing all uploaded documents with a delete action per document. The backend already exposes both endpoints (`GET /documents`, `DELETE /documents/<id>`, see [API Endpoints](#api-endpoints)); this is purely a Streamlit page + sidebar link, no new backend work needed
 - **Multi-format document ingestion** — extend the upload pipeline beyond PDF to accept Word documents (`.docx`), plain text (`.txt`), and Markdown (`.md`). Requires format-specific loaders feeding into the same chunking/embedding pipeline (`PyPDFLoader` swapped for `Docx2txtLoader`/`TextLoader`/`UnstructuredMarkdownLoader` depending on file type), plus extending the upload route's magic-byte/extension validation to the new formats
+
+### Deployment & Infra
+
+- **Automatic rollback** — redeploy the previous known-good image tag automatically if the post-deploy health check fails, instead of leaving a broken version live
+- **Docker image cleanup** — prune old/untagged images and layers on the EC2 host and in GHCR so storage doesn't grow unbounded over time
 
 ### Other Improvements
 

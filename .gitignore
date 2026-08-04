@@ -19,6 +19,7 @@ build/
 
 # Virtual Env
 venv/
+eval-venv/
 
 # Storage
 backend/storage/

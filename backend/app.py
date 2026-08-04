@@ -9,6 +9,7 @@ from logging_config import setup_logging
 
 
 from config import ( 
+    APP_ENV,
     SECRET_KEY,
     JWT_SECRET_KEY,
     SQLALCHEMY_DATABASE_URI,
@@ -147,4 +148,18 @@ def handle_exception(e):
 
 
 if __name__ == "__main__":
+    
+    # `python app.py` is the local-dev entrypoint only (Flask's dev server, not Gunicorn). 
+    # Production always boots through wsgi.py + gunicorn, and uses Alembic migrations 
+    # to manage schema — never db.create_all().
+    
+    # For local dev, APP_ENV defaults to "development" and DATABASE_URL is normally unset, 
+    # so SQLALCHEMY_DATABASE_URI falls back to local SQLite. db.create_all() is a no-op against 
+    # existing tables, so this is safe to run on every local start and removes the need for a
+    # separate manual "create the sqlite schema" step.
+    if APP_ENV == "development":
+        with app.app_context():
+            db.create_all()
+            logger.info("Database tables verified/created (development/SQLite).")
+            
     app.run(debug=False, host="0.0.0.0", port=5000)
